@@ -22,14 +22,16 @@ DB_FILE = "bot_users.db"
 PORT = int(os.getenv("PORT", "8080")) 
 
 # --- KEEP-ALIVE HEALTH SERVER ---
-# This server listens on the port Render expects, keeping the service active.
+# This server satisfies Render's port scan to keep the service active.
 def run_health_server():
     class HealthHandler(http.server.SimpleHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(b"Bot is alive and monitoring ports!")
+            self.wfile.write(b"Bot is alive!")
 
+    # Allowing address reuse helps avoid 'Port already in use' errors during restarts
+    socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("", PORT), HealthHandler) as httpd:
         print(f"✅ Health server satisfying Render port scan on port {PORT}")
         httpd.serve_forever()
@@ -127,4 +129,63 @@ def format_media_message(item, is_auto_post=False):
         caption += SPONSORED_TEXT
     return caption, img_url
 
-# --- AUTOMATIC BROADCASTING
+# --- AUTOMATIC BROADCASTING ---
+async def auto_broadcast(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Starting Auto-Broadcast...")
+    users = get_all_users()
+    trending = await fetch_tmdb_content("trending/all/day")
+    upcoming = await fetch_tmdb_content("movie/upcoming")
+    
+    items_to_post = []
+    if trending: items_to_post.append(trending[0])
+    if upcoming: items_to_post.append(upcoming[0])
+    
+    for item in items_to_post:
+        caption, img_url = format_media_message(item, is_auto_post=True)
+        for user_id in users:
+            try:
+                if img_url:
+                    await context.bot.send_photo(chat_id=user_id, photo=img_url, caption=caption, parse_mode='Markdown')
+                else:
+                    await context.bot.send_message(chat_id=user_id, text=caption, parse_mode='Markdown')
+                await asyncio.sleep(0.5) 
+            except Exception as e:
+                logger.warning(f"Failed to send to {user_id}: {e}")
+
+# --- BOT HANDLERS ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if check_ban(user_id): return
+    add_user(user_id)
+    await update.message.reply_text(
+        "👋 *Welcome to OTT Hub!*\n\n"
+        "I provide updates on Netflix, Prime, Ullu, and more.\n"
+        "**Commands:**\n"
+        "/search <name> - Find movies\n"
+        "/trending - What's hot right now",
+        parse_mode='Markdown'
+    )
+
+# --- MAIN SETUP ---
+if __name__ == '__main__':
+    init_db()
+    
+    if not BOT_TOKEN:
+        print("CRITICAL ERROR: BOT_TOKEN environment variable not set.")
+        exit(1)
+
+    # 1. Start the Health Server in a separate thread so it doesn't block the bot
+    threading.Thread(target=run_health_server, daemon=True).start()
+        
+    # 2. Build the Application
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    application.add_handler(CommandHandler('start', start))
+
+    # 3. Setup Scheduler
+    scheduler = AsyncIOScheduler()
+    scheduler.add_job(auto_broadcast, 'interval', minutes=20, args=[application])
+    scheduler.start()
+
+    print("🤖 Bot is active, health server running, and polling started...")
+    # drop_pending_updates=True helps resolve the Conflict error from simultaneous requests
+    application.run_polling(drop_pending_updates=True)
