@@ -1,155 +1,258 @@
 import logging
+import sqlite3
 import requests
+import asyncio
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+from telegram.ext import (
+    ApplicationBuilder, ContextTypes, CommandHandler, 
+    MessageHandler, filters, CallbackQueryHandler
+)
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # --- CONFIGURATION ---
 BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
 TMDB_API_KEY = "YOUR_TMDB_API_KEY"
+ADMIN_ID = 123456789  # Replace with your numeric Telegram ID
+DB_FILE = "bot_users.db"
 
-# Radarr (Movies) & Sonarr (Series) Config - For "Automatic Downloads"
-RADARR_URL = "http://localhost:7878/api/v3"
-RADARR_KEY = "YOUR_RADARR_API_KEY"
-SONARR_URL = "http://localhost:8989/api/v3"
-SONARR_KEY = "YOUR_SONARR_API_KEY"
+# --- ADVERTISING CONFIG ---
+# This text is attached to every automatic post
+SPONSORED_TEXT = (
+    "\n\n---------------------------------\n"
+    "📢 *SPONSORED: Join @MyChannel for leaks!*\n"
+    "👉 [Click Here to Watch Free](https://google.com)\n"
+    "---------------------------------"
+)
 
-# Niche Platform Mapping (Manual mapping for platforms not always on TMDB)
+# --- NICHE PLATFORMS DATABASE ---
 NICHE_PLATFORMS = {
-    "ullu": "Ullu", "rabbit": "Rabbit", "moodx": "MoodX", 
-    "prime play": "Prime Play", "uncut": "Uncut"
+    "ullu": "🦉 Ullu", "altbalaji": "💠 AltBalaji", "zee5": "🦓 Zee5",
+    "rabbit": "🐰 Rabbit", "uncut": "✂ Uncut", "bindaas": "🅱 Bindaas",
+    "nueflicks": "🆕 Nuefliks", "moodx": "😈 MoodX", "prime play": "▶ Prime Play",
+    "tri flicks": "🔺 Tri Flicks", "xtramood": "✖ Xtramood", "navarasa": "🎭 Navarasa",
+    "dreams film": "💭 Dreams Film", "nonex": "🚫 Nonex"
 }
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
-# --- 1. TMDB SEARCH ENGINE ---
-async def search_tmdb(query, media_type="multi"):
-    """Searches TMDB for movies or series."""
-    url = f"https://api.themoviedb.org/3/search/{media_type}"
-    params = {"api_key": TMDB_API_KEY, "query": query}
-    response = requests.get(url, params=params)
-    return response.json().get('results', [])
+# --- DATABASE FUNCTIONS (User Management) ---
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''CREATE TABLE IF NOT EXISTS users 
+                 (user_id INTEGER PRIMARY KEY, is_banned BOOLEAN DEFAULT 0)''')
+    conn.commit()
+    conn.close()
 
-async def get_watch_providers(media_id, media_type):
-    """Finds where the content is streaming (Netflix, Hotstar, etc.)."""
-    url = f"https://api.themoviedb.org/3/{media_type}/{media_id}/watch/providers"
-    params = {"api_key": TMDB_API_KEY}
-    response = requests.get(url, params=params)
-    results = response.json().get('results', {}).get('IN', {}) # 'IN' for India region
-    
-    providers = []
-    if 'flatrate' in results:
-        providers = [p['provider_name'] for p in results['flatrate']]
-    
-    return providers
-
-# --- 2. DOWNLOAD AUTOMATION (RADARR/SONARR) ---
-def add_to_radarr(tmdb_id, title):
-    """Sends a download request to Radarr."""
-    payload = {
-        "title": title,
-        "tmdbId": tmdb_id,
-        "qualityProfileId": 1,  # Default profile
-        "rootFolderPath": "/movies/", # Your server path
-        "monitored": True,
-        "addOptions": {"searchForMovie": True} # Triggers auto-search/download
-    }
+def add_user(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
     try:
-        r = requests.post(f"{RADARR_URL}/movie", json=payload, params={"apikey": RADARR_KEY})
-        return r.status_code in [200, 201]
+        c.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (user_id,))
+        conn.commit()
     except Exception as e:
-        logging.error(f"Radarr Error: {e}")
-        return False
+        logger.error(f"DB Error: {e}")
+    finally:
+        conn.close()
 
-def add_to_sonarr(tvdb_id, title):
-    """Sends a download request to Sonarr (Note: Sonarr uses TVDB IDs, requires extra lookup)."""
-    # Simplified for demo. In production, you convert TMDB ID to TVDB ID first.
-    return False 
+def get_all_users():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT user_id FROM users WHERE is_banned = 0")
+    users = [row[0] for row in c.fetchall()]
+    conn.close()
+    return users
 
-# --- 3. BOT COMMAND HANDLERS ---
+def ban_user_db(user_id, status=True):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("UPDATE users SET is_banned = ? WHERE user_id = ?", (status, user_id))
+    conn.commit()
+    conn.close()
+
+def check_ban(user_id):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT is_banned FROM users WHERE user_id = ?", (user_id,))
+    result = c.fetchone()
+    conn.close()
+    return result[0] if result else False
+
+# --- TMDB & CONTENT FUNCTIONS ---
+
+async def fetch_tmdb_content(endpoint="trending/all/day"):
+    """Fetches content from TMDB (Trending or Upcoming)."""
+    url = f"https://api.themoviedb.org/3/{endpoint}"
+    params = {"api_key": TMDB_API_KEY, "language": "en-US", "page": 1}
+    try:
+        response = requests.get(url, params=params)
+        data = response.json()
+        return data.get('results', [])
+    except Exception as e:
+        logger.error(f"API Error: {e}")
+        return []
+
+def format_media_message(item, is_auto_post=False):
+    """Formats the movie details into a blog-style post."""
+    title = item.get('title') or item.get('name')
+    overview = item.get('overview', 'No description available.')
+    # Truncate long descriptions
+    if len(overview) > 300: overview = overview[:300] + "..."
+    
+    media_type = item.get('media_type', 'Movie').upper()
+    rating = item.get('vote_average', 'N/A')
+    release = item.get('release_date') or item.get('first_air_date') or "Coming Soon"
+    poster_path = item.get('poster_path')
+    
+    img_url = f"https://image.tmdb.org/t/p/w500{poster_path}" if poster_path else None
+    
+    caption = (
+        f"🔥 *{title}* ({release[:4]})\n"
+        f"🌟 *Rating:* {rating}/10\n"
+        f"📺 *Category:* {media_type}\n\n"
+        f"📖 *Storyline:*\n{overview}\n"
+    )
+    
+    if is_auto_post:
+        caption += SPONSORED_TEXT
+        
+    return caption, img_url
+
+# --- AUTOMATIC BROADCASTING SYSTEM ---
+async def auto_broadcast(context: ContextTypes.DEFAULT_TYPE):
+    """Sends 2 posts every cycle to all users."""
+    logger.info("Starting Auto-Broadcast...")
+    users = get_all_users()
+    
+    # Fetch content (Mix of Trending and Upcoming)
+    trending = await fetch_tmdb_content("trending/all/day")
+    upcoming = await fetch_tmdb_content("movie/upcoming")
+    
+    # Select 2 distinct items to post
+    items_to_post = []
+    if trending: items_to_post.append(trending[0])
+    if upcoming: items_to_post.append(upcoming[0])
+    
+    for item in items_to_post:
+        caption, img_url = format_media_message(item, is_auto_post=True)
+        
+        for user_id in users:
+            try:
+                if img_url:
+                    await context.bot.send_photo(chat_id=user_id, photo=img_url, caption=caption, parse_mode='Markdown')
+                else:
+                    await context.bot.send_message(chat_id=user_id, text=caption, parse_mode='Markdown')
+                await asyncio.sleep(0.5) # Prevent hitting Telegram limits
+            except Exception as e:
+                logger.warning(f"Failed to send to {user_id}: {e}") # Usually user blocked bot
+
+# --- BOT HANDLERS ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    welcome_text = (
-        "🎬 **Advanced OTT Bot Active**\n\n"
-        "I can find content across Netflix, Hotstar, Prime, etc.\n"
-        "and automate downloads to your home server.\n\n"
+    user_id = update.effective_user.id
+    if check_ban(user_id): return # Ignore banned users
+    
+    add_user(user_id) # Save subscriber
+    
+    await update.message.reply_text(
+        "👋 *Welcome to the Ultimate OTT Hub!*\n\n"
+        "I provide updates on Netflix, Prime, Ullu, MoodX, and more.\n"
+        "You are now subscribed to auto-updates every 20 mins.\n\n"
         "**Commands:**\n"
-        "/search <name> - Search for a Movie/Series\n"
-        "/trending - See what's popular"
+        "/search <name> - Find where to watch\n"
+        "/upcoming - List upcoming movies\n"
+        "/trending - What's hot right now",
+        parse_mode='Markdown'
     )
-    await update.message.reply_text(welcome_text, parse_mode='Markdown')
 
 async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if check_ban(user_id): return
+    
     query = " ".join(context.args)
     if not query:
-        await update.message.reply_text("⚠ Please type a name. Example: `/search Mirzapur`")
+        await update.message.reply_text("🔎 Usage: `/search Mirzapur`")
         return
 
-    results = await search_tmdb(query)
-    
+    # Check Niche Platforms First
+    for key, platform_name in NICHE_PLATFORMS.items():
+        if key in query.lower():
+            await update.message.reply_text(
+                f"🎬 *{query.title()}*\n"
+                f"📺 *Available On:* {platform_name}\n"
+                f"⚠️ *Note:* This is a niche platform content.",
+                parse_mode='Markdown'
+            )
+            return
+
+    # Check TMDB
+    url = f"https://api.themoviedb.org/3/search/multi?api_key={TMDB_API_KEY}&query={query}"
+    response = requests.get(url).json()
+    results = response.get('results', [])
+
     if not results:
-        await update.message.reply_text("❌ No results found.")
+        await update.message.reply_text("❌ No results found on major or niche platforms.")
         return
 
-    # Process top 5 results
-    for item in results[:5]:
-        title = item.get('title') or item.get('name')
-        media_type = item.get('media_type', 'movie') # movie or tv
-        tmdb_id = item.get('id')
-        overview = item.get('overview', 'No description.')[:150] + "..."
-        poster_path = item.get('poster_path')
-        
-        # Get streaming info
-        providers = await get_watch_providers(tmdb_id, media_type)
-        provider_text = " | ".join(providers) if providers else "Not streaming on major apps"
-        
-        caption = (
-            f"🎥 *{title}* ({media_type.upper()})\n"
-            f"⭐ Rating: {item.get('vote_average')}\n"
-            f"📺 *Stream:* {provider_text}\n\n"
-            f"📝 {overview}"
-        )
-
-        # Buttons
-        keyboard = [
-            [InlineKeyboardButton("⬇ Add to Download Queue", callback_data=f"dl_{media_type}_{tmdb_id}_{title}")]
-        ]
-        
-        if poster_path:
-            img_url = f"https://image.tmdb.org/t/p/w500{poster_path}"
-            await update.message.reply_photo(photo=img_url, caption=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-        else:
-            await update.message.reply_text(caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
+    item = results[0]
+    caption, img_url = format_media_message(item)
     
-    data = query.data.split("_") # dl_movie_12345_Title
-    action = data[0]
-    media_type = data[1]
-    tmdb_id = data[2]
-    title = data[3]
+    keyboard = [[InlineKeyboardButton("📺 Watch Options", url="https://google.com")]] # Placeholder link
+    
+    if img_url:
+        await update.message.reply_photo(photo=img_url, caption=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
+    else:
+        await update.message.reply_text(caption, parse_mode='Markdown')
 
-    if action == "dl":
-        if media_type == "movie":
-            success = add_to_radarr(tmdb_id, title)
-            if success:
-                await query.edit_message_caption(caption=f"✅ *{title}* added to Radarr. Downloading started!", parse_mode='Markdown')
-            else:
-                await query.edit_message_caption(caption=f"❌ Failed to add *{title}* to Radarr. Check server logs.", parse_mode='Markdown')
-        elif media_type == "tv":
-            await query.edit_message_caption(caption="⚠ Auto-download for Series (Sonarr) requires TVDB ID conversion (Advanced Logic).", parse_mode='Markdown')
+# --- ADMIN COMMANDS ---
 
-# --- MAIN EXECUTION ---
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    users = get_all_users()
+    await update.message.reply_text(f"📊 **Total Subscribers:** {len(users)}")
+
+async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    try:
+        target_id = int(context.args[0])
+        ban_user_db(target_id, True)
+        await update.message.reply_text(f"🚫 User {target_id} BANNED.")
+    except:
+        await update.message.reply_text("Usage: /ban 123456789")
+
+async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    try:
+        target_id = int(context.args[0])
+        ban_user_db(target_id, False)
+        await update.message.reply_text(f"✅ User {target_id} UNBANNED.")
+    except:
+        await update.message.reply_text("Usage: /unban 123456789")
+
+# --- MAIN SETUP ---
 if __name__ == '__main__':
+    # 1. Initialize Database
+    init_db()
+    
+    # 2. Build Application
     application = ApplicationBuilder().token(BOT_TOKEN).build()
     
+    # 3. Add Handlers
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('search', search_handler))
-    application.add_handler(CallbackQueryHandler(button_callback))
-    
-    print("Bot is running...")
+    application.add_handler(CommandHandler('stats', stats))
+    application.add_handler(CommandHandler('ban', ban))
+    application.add_handler(CommandHandler('unban', unban))
+
+    # 4. Setup Scheduler (Auto-Post every 20 mins)
+    scheduler = AsyncIOScheduler()
+    # Add job to run every 20 minutes
+    scheduler.add_job(auto_broadcast, 'interval', minutes=20, args=[application])
+    scheduler.start()
+
+    print("🤖 Bot with Auto-Ads & Admin Tools is Running...")
     application.run_polling()
