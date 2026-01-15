@@ -2,6 +2,7 @@ import logging
 import sqlite3
 import requests
 import asyncio
+import os
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, ContextTypes, CommandHandler, 
@@ -9,14 +10,14 @@ from telegram.ext import (
 )
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-# --- CONFIGURATION ---
-BOT_TOKEN = "YOUR_TELEGRAM_BOT_TOKEN"
-TMDB_API_KEY = "YOUR_TMDB_API_KEY"
-ADMIN_ID = 123456789  # Replace with your numeric Telegram ID
+# --- CONFIGURATION (Using Environment Variables) ---
+# Set these in the Render Dashboard under "Environment"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+TMDB_API_KEY = os.getenv("TMDB_API_KEY")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0")) 
 DB_FILE = "bot_users.db"
 
 # --- ADVERTISING CONFIG ---
-# This text is attached to every automatic post
 SPONSORED_TEXT = (
     "\n\n---------------------------------\n"
     "📢 *SPONSORED: Join @MyChannel for leaks!*\n"
@@ -39,7 +40,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- DATABASE FUNCTIONS (User Management) ---
+# --- DATABASE FUNCTIONS ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -83,9 +84,7 @@ def check_ban(user_id):
     return result[0] if result else False
 
 # --- TMDB & CONTENT FUNCTIONS ---
-
 async def fetch_tmdb_content(endpoint="trending/all/day"):
-    """Fetches content from TMDB (Trending or Upcoming)."""
     url = f"https://api.themoviedb.org/3/{endpoint}"
     params = {"api_key": TMDB_API_KEY, "language": "en-US", "page": 1}
     try:
@@ -97,10 +96,8 @@ async def fetch_tmdb_content(endpoint="trending/all/day"):
         return []
 
 def format_media_message(item, is_auto_post=False):
-    """Formats the movie details into a blog-style post."""
     title = item.get('title') or item.get('name')
     overview = item.get('overview', 'No description available.')
-    # Truncate long descriptions
     if len(overview) > 300: overview = overview[:300] + "..."
     
     media_type = item.get('media_type', 'Movie').upper()
@@ -116,52 +113,41 @@ def format_media_message(item, is_auto_post=False):
         f"📺 *Category:* {media_type}\n\n"
         f"📖 *Storyline:*\n{overview}\n"
     )
-    
     if is_auto_post:
         caption += SPONSORED_TEXT
-        
     return caption, img_url
 
-# --- AUTOMATIC BROADCASTING SYSTEM ---
+# --- AUTOMATIC BROADCASTING ---
 async def auto_broadcast(context: ContextTypes.DEFAULT_TYPE):
-    """Sends 2 posts every cycle to all users."""
     logger.info("Starting Auto-Broadcast...")
     users = get_all_users()
-    
-    # Fetch content (Mix of Trending and Upcoming)
     trending = await fetch_tmdb_content("trending/all/day")
     upcoming = await fetch_tmdb_content("movie/upcoming")
     
-    # Select 2 distinct items to post
     items_to_post = []
     if trending: items_to_post.append(trending[0])
     if upcoming: items_to_post.append(upcoming[0])
     
     for item in items_to_post:
         caption, img_url = format_media_message(item, is_auto_post=True)
-        
         for user_id in users:
             try:
                 if img_url:
                     await context.bot.send_photo(chat_id=user_id, photo=img_url, caption=caption, parse_mode='Markdown')
                 else:
                     await context.bot.send_message(chat_id=user_id, text=caption, parse_mode='Markdown')
-                await asyncio.sleep(0.5) # Prevent hitting Telegram limits
+                await asyncio.sleep(0.5) 
             except Exception as e:
-                logger.warning(f"Failed to send to {user_id}: {e}") # Usually user blocked bot
+                logger.warning(f"Failed to send to {user_id}: {e}")
 
 # --- BOT HANDLERS ---
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
-    if check_ban(user_id): return # Ignore banned users
-    
-    add_user(user_id) # Save subscriber
-    
+    if check_ban(user_id): return
+    add_user(user_id)
     await update.message.reply_text(
         "👋 *Welcome to the Ultimate OTT Hub!*\n\n"
         "I provide updates on Netflix, Prime, Ullu, MoodX, and more.\n"
-        "You are now subscribed to auto-updates every 20 mins.\n\n"
         "**Commands:**\n"
         "/search <name> - Find where to watch\n"
         "/upcoming - List upcoming movies\n"
@@ -172,19 +158,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if check_ban(user_id): return
-    
     query = " ".join(context.args)
     if not query:
         await update.message.reply_text("🔎 Usage: `/search Mirzapur`")
         return
 
-    # Check Niche Platforms First
+    # Check Niche Platforms
     for key, platform_name in NICHE_PLATFORMS.items():
         if key in query.lower():
             await update.message.reply_text(
-                f"🎬 *{query.title()}*\n"
-                f"📺 *Available On:* {platform_name}\n"
-                f"⚠️ *Note:* This is a niche platform content.",
+                f"🎬 *{query.title()}*\n📺 *Available On:* {platform_name}",
                 parse_mode='Markdown'
             )
             return
@@ -195,64 +178,39 @@ async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     results = response.get('results', [])
 
     if not results:
-        await update.message.reply_text("❌ No results found on major or niche platforms.")
+        await update.message.reply_text("❌ No results found.")
         return
 
     item = results[0]
     caption, img_url = format_media_message(item)
-    
-    keyboard = [[InlineKeyboardButton("📺 Watch Options", url="https://google.com")]] # Placeholder link
+    keyboard = [[InlineKeyboardButton("📺 Watch Options", url="https://google.com")]]
     
     if img_url:
         await update.message.reply_photo(photo=img_url, caption=caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         await update.message.reply_text(caption, parse_mode='Markdown')
 
-# --- ADMIN COMMANDS ---
-
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     users = get_all_users()
     await update.message.reply_text(f"📊 **Total Subscribers:** {len(users)}")
 
-async def ban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    try:
-        target_id = int(context.args[0])
-        ban_user_db(target_id, True)
-        await update.message.reply_text(f"🚫 User {target_id} BANNED.")
-    except:
-        await update.message.reply_text("Usage: /ban 123456789")
-
-async def unban(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID: return
-    try:
-        target_id = int(context.args[0])
-        ban_user_db(target_id, False)
-        await update.message.reply_text(f"✅ User {target_id} UNBANNED.")
-    except:
-        await update.message.reply_text("Usage: /unban 123456789")
-
-# --- MAIN SETUP ---
+# --- MAIN ---
 if __name__ == '__main__':
-    # 1. Initialize Database
     init_db()
-    
-    # 2. Build Application
+    if not BOT_TOKEN:
+        print("Error: BOT_TOKEN not found in environment variables.")
+        exit(1)
+        
     application = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    # 3. Add Handlers
     application.add_handler(CommandHandler('start', start))
     application.add_handler(CommandHandler('search', search_handler))
     application.add_handler(CommandHandler('stats', stats))
-    application.add_handler(CommandHandler('ban', ban))
-    application.add_handler(CommandHandler('unban', unban))
 
-    # 4. Setup Scheduler (Auto-Post every 20 mins)
     scheduler = AsyncIOScheduler()
-    # Add job to run every 20 minutes
     scheduler.add_job(auto_broadcast, 'interval', minutes=20, args=[application])
     scheduler.start()
 
-    print("🤖 Bot with Auto-Ads & Admin Tools is Running...")
+    print("🤖 Bot is Running...")
     application.run_polling()
+    
