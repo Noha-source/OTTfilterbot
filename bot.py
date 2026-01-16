@@ -13,7 +13,7 @@ from telegram.ext import (
 )
 
 # --- CONFIGURATION ---
-BOT_TOKEN = OS.gentenv("BOT_TOKEN)
+TOKEN = OS.gentenv("BOT_TOKEN)
 ADMIN_ID = 123456789  # Replace with your numeric Telegram ID
 CHANNEL_ID = "@your_channel_username"  # Channel to sync ads/posts to
 
