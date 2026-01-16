@@ -14,9 +14,12 @@ from telegram.ext import (
 )
 
 # --- CONFIGURATION ---
-TOKEN = OS.gentenv("BOT_TOKEN)
-ADMIN_ID = 123456789  # Replace with your numeric Telegram ID
-CHANNEL_ID = "@your_channel_username"  # Channel to sync ads/posts to
+# I fixed the syntax error here. 
+# Make sure you have added 'BOT_TOKEN' to your Environment Variables in Render.
+TOKEN = os.getenv("BOT_TOKEN") 
+
+ADMIN_ID = 123456789  # <--- REPLACE with your actual Numeric ID
+CHANNEL_ID = "@your_channel_username"  # <--- REPLACE with your Channel Username
 
 # --- LOGGING SETUP ---
 logging.basicConfig(
@@ -168,9 +171,8 @@ async def advertise(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
     """
     Feature 4: Automatically posts content.
-    Replace the dummy text below with your scraping logic or API call.
     """
-    # Placeholder content - You would insert your fetching logic here
+    # Placeholder content
     blog_content = (
         "🎬 **Entertainment Update**\n\n"
         "Here are the latest trending updates!\n"
@@ -219,7 +221,11 @@ async def set_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- MAIN ---
 
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    if not TOKEN:
+        print("Error: BOT_TOKEN not found. Set it in Render Environment Variables.")
+        return
+
+    app = ApplicationBuilder().token(TOKEN).build()
 
     # Admin Handlers
     app.add_handler(CommandHandler("ad", advertise))      # Broadcasting
