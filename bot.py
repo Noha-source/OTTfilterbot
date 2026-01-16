@@ -20,7 +20,7 @@ DB_FILE = "bot_users.db"
 PORT = int(os.getenv("PORT", "8080")) 
 
 # --- KEEP-ALIVE HEALTH SERVER ---
-# This satisfies Render's port scan to keep the service active.
+# This satisfies Render's port scan
 def run_health_server():
     class HealthHandler(http.server.SimpleHTTPRequestHandler):
         def do_GET(self):
@@ -107,7 +107,7 @@ async def fetch_tmdb_content(endpoint="trending/all/day"):
 def format_media_message(item, is_auto_post=False):
     title = item.get('title') or item.get('name')
     overview = item.get('overview', 'No description available.')
-    if len(overview) > 300: overview = overview[:300] + "... "
+    if len(overview) > 300: overview = overview[:300] + "..."
     
     media_type = item.get('media_type', 'Movie').upper()
     rating = item.get('vote_average', 'N/A')
@@ -124,4 +124,69 @@ def format_media_message(item, is_auto_post=False):
     )
     if is_auto_post:
         caption += SPONSORED_TEXT
-    return caption, img
+    return caption, img_url
+
+# --- AUTOMATIC BROADCASTING (Native JobQueue) ---
+async def auto_broadcast(context: ContextTypes.DEFAULT_TYPE):
+    logger.info("Starting Auto-Broadcast via JobQueue...")
+    users = get_all_users()
+    if not users:
+        return
+
+    trending = await fetch_tmdb_content("trending/all/day")
+    upcoming = await fetch_tmdb_content("movie/upcoming")
+    
+    items_to_post = []
+    if trending: items_to_post.append(trending[0])
+    if upcoming: items_to_post.append(upcoming[0])
+    
+    for item in items_to_post:
+        caption, img_url = format_media_message(item, is_auto_post=True)
+        for user_id in users:
+            try:
+                if img_url:
+                    await context.bot.send_photo(chat_id=user_id, photo=img_url, caption=caption, parse_mode='Markdown')
+                else:
+                    await context.bot.send_message(chat_id=user_id, text=caption, parse_mode='Markdown')
+                await asyncio.sleep(0.5) 
+            except Exception as e:
+                logger.warning(f"Failed to send to {user_id}: {e}")
+
+# --- BOT HANDLERS ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if check_ban(user_id): return
+    add_user(user_id)
+    await update.message.reply_text(
+        "👋 *Welcome to OTT Hub!*\n\n"
+        "I provide updates on Netflix, Prime, Ullu, and more.\n"
+        "**Commands:**\n"
+        "/search <name> - Find movies\n"
+        "/trending - What's hot right now",
+        parse_mode='Markdown'
+    )
+
+# --- MAIN SETUP ---
+if __name__ == '__main__':
+    init_db()
+    
+    if not BOT_TOKEN:
+        print("CRITICAL ERROR: BOT_TOKEN environment variable not set.")
+        exit(1)
+
+    # 1. Start the Health Server in a separate thread
+    threading.Thread(target=run_health_server, daemon=True).start()
+        
+    # 2. Build the Application with built-in JobQueue support
+    application = ApplicationBuilder().token(BOT_TOKEN).build()
+    
+    # 3. Add Handlers
+    application.add_handler(CommandHandler('start', start))
+
+    # 4. Setup built-in JobQueue (Runs every 1200 seconds / 20 mins)
+    job_queue = application.job_queue
+    job_queue.run_repeating(auto_broadcast, interval=1200, first=10)
+
+    print("🤖 Bot is active, health server running, and job queue started...")
+    # drop_pending_updates=True resolves the Conflict error
+    application.run_polling(drop_pending_updates=True)
