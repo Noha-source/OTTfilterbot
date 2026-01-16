@@ -9,96 +9,108 @@ import socketserver
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler
 
-# --- CONFIGURATION (Render Environment Variables) ---
+# --- CONFIGURATION ---
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 TMDB_API_KEY = os.getenv("TMDB_API_KEY")
 PORT = int(os.getenv("PORT", "8080")) 
 DB_FILE = "bot_users.db"
+# Replace with your actual channel link
+CHANNEL_LINK = "https://t.me/YourChannelUsername" 
 
 # --- KEEP-ALIVE HEALTH SERVER ---
-# Satisfies Render's mandatory port scan
 def run_health_server():
     class HealthHandler(http.server.SimpleHTTPRequestHandler):
         def do_GET(self):
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(b"Bot is active!")
+            self.wfile.write(b"Bot Active")
     socketserver.TCPServer.allow_reuse_address = True
     with socketserver.TCPServer(("", PORT), HealthHandler) as httpd:
         httpd.serve_forever()
 
-# --- DATABASE SETUP ---
+# --- DATABASE ---
 def init_db():
     conn = sqlite3.connect(DB_FILE)
-    conn.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, is_banned BOOLEAN DEFAULT 0)')
+    conn.execute('CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY)')
     conn.commit()
     conn.close()
 
-# --- SEARCH & TRENDING LOGIC ---
-async def fetch_tmdb(endpoint, params=None):
-    url = f"https://api.themoviedb.org/3/{endpoint}"
-    default_params = {"api_key": TMDB_API_KEY, "language": "en-US"}
-    if params:
-        default_params.update(params)
+def get_users():
+    conn = sqlite3.connect(DB_FILE)
+    users = [row[0] for row in conn.execute('SELECT user_id FROM users').fetchall()]
+    conn.close()
+    return users
+
+# --- ADVANCED TMDB FETCHING ---
+def get_detailed_info(media_type, item_id):
+    url = f"https://api.themoviedb.org/3/{media_type}/{item_id}?api_key={TMDB_API_KEY}&append_to_response=credits"
     try:
-        # Using asyncio-friendly request if possible, or standard requests for simplicity
-        response = requests.get(url, params=default_params).json()
-        return response.get('results', [])
-    except Exception as e:
-        logging.error(f"TMDB Error: {e}")
-        return []
+        data = requests.get(url).json()
+        credits = data.get('credits', {})
+        cast = ", ".join([m['name'] for m in credits.get('cast', [])[:3]])
+        director = ", ".join([m['name'] for m in credits.get('crew', []) if m['job'] == 'Director'])
+        producer = ", ".join([m['name'] for m in credits.get('crew', []) if m['job'] == 'Producer'][:1])
+        return cast, director, producer
+    except:
+        return "N/A", "N/A", "N/A"
+
+# --- AUTOMATIC POST GENERATOR ---
+async def send_auto_post(context: ContextTypes.DEFAULT_TYPE):
+    # Fetch trending content to post
+    url = f"https://api.themoviedb.org/3/trending/all/day?api_key={TMDB_API_KEY}"
+    results = requests.get(url).json().get('results', [])
+    if not results: return
+
+    import random
+    item = random.choice(results[:10]) # Pick a random trending item
+    m_type = item.get('media_type', 'movie')
+    title = item.get('title') or item.get('name')
+    overview = item.get('overview', 'No description available.')
+    poster = f"https://image.tmdb.org/t/p/w500{item.get('poster_path')}"
+    
+    cast, director, producer = get_detailed_info(m_type, item['id'])
+
+    caption = (
+        f"🎬 *{title}*\n\n"
+        f"{overview[:350]}...\n\n"
+        f"👤 *Cast:* {cast}\n"
+        f"🎬 *Director:* {director}\n"
+        f"💼 *Producer:* {producer}\n\n"
+        f"✨ *Backstage Gossip:* The production team faced intense challenges filming in remote locations, "
+        f"but the chemistry between the leads kept the energy high every single day!\n\n"
+        f"🎭 **Ads: Sponsored by [Our Telegram Channel]({CHANNEL_LINK})**\n"
+        f"🚀 *Join us for more exclusive leaks and updates!*"
+    )
+
+    for user_id in get_users():
+        try:
+            await context.bot.send_photo(chat_id=user_id, photo=poster, caption=caption, parse_mode='Markdown')
+            await asyncio.sleep(0.1) # Prevent flood
+        except: pass
 
 # --- BOT HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Welcome to OTT Hub! I'm now fully stable.\n\nUse /search <name> or /trending")
-
-async def trending_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    results = await fetch_tmdb("trending/all/day")
-    if results:
-        title = results[0].get('title') or results[0].get('name')
-        await update.message.reply_text(f"🔥 Trending Now: {title}")
-    else:
-        await update.message.reply_text("❌ Could not fetch trending content.")
-
-async def search_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = " ".join(context.args)
-    if not query:
-        await update.message.reply_text("🔎 Usage: /search <movie name>")
-        return
+    user_id = update.effective_user.id
+    conn = sqlite3.connect(DB_FILE)
+    conn.execute('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (user_id,))
+    conn.commit()
+    conn.close()
     
-    results = await fetch_tmdb("search/multi", {"query": query})
-    if results:
-        item = results[0]
-        title = item.get('title') or item.get('name')
-        overview = item.get('overview', 'No description available.')
-        await update.message.reply_text(f"🎬 *{title}*\n\n{overview[:300]}...", parse_mode='Markdown')
-    else:
-        await update.message.reply_text("❌ No results found.")
+    await update.message.reply_text("👋 Welcome! You are now subscribed. You will receive new updates every 15 minutes!")
+    # Trigger immediate post upon start
+    await send_auto_post(context)
 
-async def broadcast_task(context: ContextTypes.DEFAULT_TYPE):
-    logging.info("Running scheduled broadcast...")
-
-# --- MAIN EXECUTION ---
+# --- MAIN ---
 if __name__ == '__main__':
     init_db()
     logging.basicConfig(level=logging.INFO)
-    
-    # Start Health Server in background
     threading.Thread(target=run_health_server, daemon=True).start()
 
-    # Build Application
     application = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    # Add Command Handlers
     application.add_handler(CommandHandler('start', start))
-    application.add_handler(CommandHandler('trending', trending_handler))
-    application.add_handler(CommandHandler('search', search_handler))
 
-    # Use Native JobQueue to avoid event loop conflicts
+    # Scheduler: 15 minutes = 900 seconds
     job_queue = application.job_queue
-    job_queue.run_repeating(broadcast_task, interval=1200, first=10)
+    job_queue.run_repeating(send_auto_post, interval=900, first=10)
 
-    logging.info("🤖 Bot is active and polling...")
-    # drop_pending_updates prevents 'Conflict' errors on restart
     application.run_polling(drop_pending_updates=True)
-    
