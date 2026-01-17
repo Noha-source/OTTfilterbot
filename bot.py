@@ -4,192 +4,146 @@ import asyncio
 import os
 import sys
 import threading
+import requests
 import random
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.error import Forbidden, BadRequest, InvalidToken
-from telegram.ext import (
-    ApplicationBuilder,
-    ContextTypes,
-    CommandHandler,
-    MessageHandler,
-    filters,
-    Defaults
-)
+from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, filters
 
 # --- CONFIGURATION ---
 TOKEN = os.getenv("BOT_TOKEN")
+XMDB_API_KEY = os.getenv("XMDB_API_KEY")  # Get from http://www.omdbapi.com/
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-SPONSOR_CHANNEL = os.getenv("SPONSOR_CHANNEL", "@SponsorChannel")
-PORT = int(os.getenv("PORT", 8080))
-WITHDRAW_MIN = 200
-EARN_PER_POST = 10
+SPONSOR_CHANNEL = os.getenv("CHANNEL_ID", "@SponsorChannel")
+PORT = int(os.environ.get("PORT", 8080))
+EARNINGS_PER_POST = 10  # Amount earned per automated post (in ₹)
 
-# Pre-flight check to prevent the loop errors seen in logs
 if not TOKEN or ":" not in TOKEN:
-    print("❌ FATAL ERROR: Invalid or missing BOT_TOKEN in Environment Variables.")
+    print("❌ FATAL: BOT_TOKEN is missing or invalid.")
     sys.exit(1)
 
-# --- LOGGING SETUP ---
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
-logger = logging.getLogger(__name__)
-
-# --- DATABASE HANDLER ---
+# --- DATABASE ---
 class Database:
-    def __init__(self, db_name="bot_data.db"):
-        self.conn = sqlite3.connect(db_name, check_same_thread=False)
+    def __init__(self):
+        self.conn = sqlite3.connect("bot_data.db", check_same_thread=False)
         self.cursor = self.conn.cursor()
-        self.create_tables()
+        self.setup()
 
-    def create_tables(self):
-        self.cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                user_id INTEGER PRIMARY KEY,
-                username TEXT,
-                join_date TEXT,
-                status TEXT,
-                balance INTEGER DEFAULT 0,
-                warn_count INTEGER DEFAULT 0
-            )
-        """)
+    def setup(self):
+        # Tracking users and their individual join dates
+        self.cursor.execute("""CREATE TABLE IF NOT EXISTS users 
+            (user_id INTEGER PRIMARY KEY, username TEXT, join_date TEXT, earnings INTEGER DEFAULT 0)""")
+        # Global earnings tracking for the admin
+        self.cursor.execute("CREATE TABLE IF NOT EXISTS admin_stats (total_earned INTEGER DEFAULT 0)")
+        self.cursor.execute("INSERT OR IGNORE INTO admin_stats (rowid, total_earned) VALUES (1, 0)")
         self.conn.commit()
 
     def add_user(self, user_id, username):
         date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        self.cursor.execute(
-            "INSERT OR IGNORE INTO users (user_id, username, join_date, status) VALUES (?, ?, ?, ?)",
-            (user_id, username, date, "active")
-        )
+        self.cursor.execute("INSERT OR IGNORE INTO users (user_id, username, join_date) VALUES (?, ?, ?)", (user_id, username, date))
         self.conn.commit()
 
-    def update_balance(self, user_id, amount):
-        self.cursor.execute("UPDATE users SET balance = balance + ? WHERE user_id = ?", (amount, user_id))
+    def increment_earnings(self, amount):
+        self.cursor.execute("UPDATE admin_stats SET total_earned = total_earned + ? WHERE rowid = 1", (amount,))
         self.conn.commit()
 
 db = Database()
 
-# --- AI XMDB BLOG GENERATOR ---
-def generate_ai_content():
-    movies = ["Pushpa 2", "Kalki 2898 AD", "Deadpool & Wolverine", "Squid Game S2", "Heeramandi"]
-    platforms = ["Netflix", "Prime Video", "JioCinema", "Disney+ Hotstar"]
-    movie = random.choice(movies)
-    platform = random.choice(platforms)
+# --- MOVIE API FETCH (XMDB/OMDb) ---
+async def fetch_movie_data():
+    """Fetches real movie details and posters using OMDb API."""
+    trending = ["Pathaan", "Inception", "Interstellar", "Stree 2", "The Dark Knight", "Dune", "Pushpa"]
+    movie_name = random.choice(trending)
+    url = f"http://www.omdbapi.com/?apikey={XMDB_API_KEY}&t={movie_name}&plot=short"
     
-    blog = (
-        f"🎬 **XMDB AI UPDATE: {movie}**\n\n"
-        f"This trending hit is currently dominating {platform}! "
-        "Experience the best of Bollywood and Hollywood storytelling.\n\n"
-        f"🌟 **Rating:** ⭐⭐⭐⭐⭐\n"
-        f"🔗 **Watch on:** {platform}\n\n"
-        f"📢 **Sponsor:** {SPONSOR_CHANNEL}\n"
-        f"✅ *Join our sponsor for premium access!*"
-    )
-    return blog
+    try:
+        response = requests.get(url).json()
+        if response.get("Response") == "True":
+            return response
+    except Exception as e:
+        logging.error(f"XMDB API Error: {e}")
+    return None
 
-# --- AUTOMATED TASKS ---
+# --- AUTOMATED BLOG JOB ---
 async def auto_post_job(context: ContextTypes.DEFAULT_TYPE):
-    content = generate_ai_content()
-    # Fetch all active users
-    db.cursor.execute("SELECT user_id FROM users WHERE status = 'active'")
+    """Broadcasts a movie poster and blog every 5 minutes."""
+    data = await fetch_movie_data()
+    if not data: return
+
+    # Format the Blog Post
+    blog_text = (
+        f"🎬 **XMDB SPECIAL: {data.get('Title')} ({data.get('Year')})**\n\n"
+        f"📝 **Description:** {data.get('Plot')}\n\n"
+        f"⭐ **Global Rating:** {data.get('imdbRating')}/10\n"
+        f"🎭 **Genre:** {data.get('Genre')}\n\n"
+        f"✅ **Why Watch?** This is a top-rated masterpiece trending across OTT platforms! Highly recommended for a weekend binge.\n\n"
+        f"📢 **Join Sponsor:** {SPONSOR_CHANNEL}\n"
+        f"👤 **Admin:** [Contact](tg://user?id={ADMIN_ID})"
+    )
+
+    db.cursor.execute("SELECT user_id FROM users")
     users = db.cursor.fetchall()
     
-    success_count = 0
-    for (u_id,) in users:
+    for (user_id,) in users:
         try:
-            await context.bot.send_message(chat_id=u_id, text=content, parse_mode=ParseMode.MARKDOWN)
-            success_count += 1
-        except Forbidden:
-            db.cursor.execute("UPDATE users SET status = 'inactive' WHERE user_id = ?", (u_id,))
-            db.conn.commit()
-        except Exception:
-            pass
+            # Send movie poster with the blog as caption
+            await context.bot.send_photo(
+                chat_id=user_id, 
+                photo=data.get('Poster'), 
+                caption=blog_text, 
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception: pass
     
-    # Earn 10rs per automatic post
-    db.update_balance(ADMIN_ID, EARN_PER_POST)
-    logger.info(f"Auto-post complete. Reached {success_count} users. Admin earned ₹{EARN_PER_POST}.")
+    # Track earnings (Admin earns ₹10 per automated post)
+    db.increment_earnings(EARNINGS_PER_POST)
 
-# --- COMMAND HANDLERS ---
+# --- ADMIN COMMANDS ---
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    
+    db.cursor.execute("SELECT COUNT(*) FROM users")
+    user_count = db.cursor.fetchone()[0]
+    db.cursor.execute("SELECT total_earned FROM admin_stats WHERE rowid = 1")
+    total_earned = db.cursor.fetchone()[0]
+    
+    await update.message.reply_text(
+        f"📊 **ADMIN DASHBOARD**\n\n"
+        f"👥 **Total Subscribers:** {user_count}\n"
+        f"💰 **Total Earned:** ₹{total_earned}\n"
+        f"💸 **Earned per Post:** ₹{EARNINGS_PER_POST}\n\n"
+        f"The bot posts every 5 minutes automatically."
+    )
+
+# --- CORE HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     db.add_user(user.id, user.username)
-    
-    welcome_text = (
-        f"👋 **Welcome, {user.first_name}!**\n\n"
-        "You are now subscribed to **XMDB AI Movie Updates**.\n"
-        "🚀 You will receive Bollywood & Hollywood reviews every 5 minutes!\n\n"
-        f"📢 **Join Sponsor:** {SPONSOR_CHANNEL}\n"
-        "⚠️ *Spammers will be warned and banned.*"
+    await update.message.reply_text(
+        f"✨ **Welcome {user.first_name} to OTT Hub!**\n\n"
+        f"You will now receive automatic AI movie blogs and OTT recommendations every 5 minutes.\n\n"
+        f"📢 **Recommended Sponsor:** {SPONSOR_CHANNEL}"
     )
-    await update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN)
 
-async def withdraw(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        return
-    
-    db.cursor.execute("SELECT balance FROM users WHERE user_id = ?", (ADMIN_ID,))
-    balance = db.cursor.fetchone()[0]
-    
-    if balance >= WITHDRAW_MIN:
-        await update.message.reply_text(f"💰 **Balance:** ₹{balance}\nProcessing withdrawal to UPI/Bank... ✅")
-        db.cursor.execute("UPDATE users SET balance = 0 WHERE user_id = ?", (ADMIN_ID,))
-        db.conn.commit()
-    else:
-        await update.message.reply_text(f"❌ Minimum ₹{WITHDRAW_MIN} required. Current: ₹{balance}")
-
-async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin tool to post ads/personal messages manually."""
-    if update.effective_user.id != ADMIN_ID:
-        return
-    
-    if not update.message.reply_to_message:
-        await update.message.reply_text("⚠️ Reply to a message to broadcast it.")
-        return
-
-    db.cursor.execute("SELECT user_id FROM users WHERE status = 'active'")
-    users = db.cursor.fetchall()
-    
-    for (u_id,) in users:
-        try:
-            await context.bot.copy_message(chat_id=u_id, from_chat_id=update.message.chat_id, 
-                                          message_id=update.message.reply_to_message.message_id)
-        except Exception:
-            pass
-    await update.message.reply_text("✅ Broadcast complete.")
-
-# --- WEB SERVER (For Render Health Check) ---
-class HealthCheck(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200); self.end_headers()
-        self.wfile.write(b"AI Movie Bot is Active")
-
-def run_server():
-    HTTPServer(("0.0.0.0", PORT), HealthCheck).serve_forever()
-
-# --- MAIN ---
+# --- MAIN RUNNER ---
 def main():
-    threading.Thread(target=run_server, daemon=True).start()
+    # Start health server for Render
+    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", PORT), HealthHandler).serve_forever(), daemon=True).start()
     
-    try:
-        app = ApplicationBuilder().token(TOKEN).build()
-        
-        # Handlers
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(CommandHandler("withdraw", withdraw))
-        app.add_handler(CommandHandler("ad", broadcast))
-        app.add_handler(CommandHandler("broadcast", broadcast))
-        
-        # Scheduler: 5 Minutes (300 seconds)
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("stats", stats))
+    
+    # 5-Minute Auto Posting Job (300 seconds)
+    if app.job_queue:
         app.job_queue.run_repeating(auto_post_job, interval=300, first=10)
-        
-        print("🤖 Bot is starting polling...")
-        app.run_polling()
-    except InvalidToken:
-        logger.error("❌ TOKEN REJECTED. Please check your Render Environment Variables.")
+    
+    print("🤖 AI Movie Bot is polling...")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
+    
