@@ -1,6 +1,5 @@
 python-telegram-bot
 apscheduler
-jikanpy
 aiosqlite
 aiohttp
 nest_asyncio
