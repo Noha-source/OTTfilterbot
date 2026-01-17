@@ -1,10 +1,3 @@
-Here is the updated script. I have **removed `jikanpy**` and replaced the `auto_blog_job` logic with **AniList GraphQL** queries.
-
-I have kept the database, broadcasting system, web server, and all admin commands exactly as they were.
-
-### `main.py`
-
-```python
 import logging
 import asyncio
 import os
