@@ -168,7 +168,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await db.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (chat.id,))
             await db.execute("UPDATE users SET status='active' WHERE user_id=?", (chat.id,))
             await db.commit()
-        await update.message.reply_text(f"🌟 <b>Welcome!</b> You will now receive anime recommendations every 10 minutes.", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(f"🌟 <b>Welcome!</b> 🌟  Konnichiwa, mr.Unknown! 🌟
+
+Welcome to the Ultimate Anime Broadcast Bot.
+
+🤖 What do I do?
+• I deliver the hottest Anime recommendations every 10 minutes.
+• I notify you about updates from MY ANIME ENGLISH DUB.
+• I bring you direct links to watch your favorite shows.
+
+✨ Sit back, relax, and let the anime come to you!.", parse_mode=ParseMode.HTML)
     else:
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute("INSERT OR IGNORE INTO groups (chat_id, title) VALUES (?, ?)", (chat.id, chat.title))
