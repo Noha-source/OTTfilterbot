@@ -1,8 +1,3 @@
-Here is the **complete, final version** of your script `main.py` with the `deletelink` feature fully integrated.
-
-I have inserted the new function and the handler exactly where they belong without changing the rest of your logic.
-
-```python
 import logging
 import asyncio
 import os
@@ -355,5 +350,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-```
