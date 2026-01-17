@@ -16,6 +16,7 @@ TOKEN = os.getenv('TOKEN', 'YOUR_BOT_TOKEN_HERE')
 ADMIN_ID = int(os.getenv('ADMIN_ID', '123456789')) 
 CHANNEL_NAME = os.getenv('CHANNEL_NAME', 'My Anime Channel')
 CHANNEL_LINK = os.getenv('CHANNEL_LINK', 'https://t.me/your_channel_link')
+# This line ensures it runs on Port 8080 locally, or whatever Port Render assigns
 PORT = int(os.getenv('PORT', 8080))
 DB_NAME = "bot_data.db"
 
@@ -181,3 +182,78 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await db.execute("UPDATE users SET status='active' WHERE user_id=?", (chat.id,))
             await db.commit()
         await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
+    else:
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("INSERT OR IGNORE INTO groups (chat_id, title) VALUES (?, ?)", (chat.id, chat.title))
+            await db.commit()
+        await update.message.reply_text("✅ <b>Bot Activated in this Group!</b>", parse_mode=ParseMode.HTML)
+
+async def set_anime_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    try:
+        raw = ' '.join(context.args)
+        name, link = raw.split('|')
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute("INSERT OR REPLACE INTO anime_links VALUES (?, ?)", (name.strip().lower(), link.strip()))
+            await db.commit()
+        await update.message.reply_text(f"✅ Saved link for: {name.strip()}")
+    except:
+        await update.message.reply_text("❌ Format: `/setlink Name | Link`", parse_mode=ParseMode.MARKDOWN)
+
+async def delete_anime_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    name = ' '.join(context.args).strip().lower()
+    async with aiosqlite.connect(DB_NAME) as db:
+        await db.execute("DELETE FROM anime_links WHERE anime_name = ?", (name,))
+        await db.commit()
+    await update.message.reply_text(f"🗑️ Deleted link for: {name}")
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    reply = update.message.reply_to_message
+    if not reply: return await update.message.reply_text("Reply to a message to broadcast.")
+    targets = await get_all_chats()
+    for chat_id in targets:
+        try:
+            await context.bot.copy_message(chat_id, update.effective_chat.id, reply.message_id)
+        except:
+            await mark_inactive(chat_id)
+    await update.message.reply_text("✅ Broadcast complete.")
+
+# ================= WEB SERVER =================
+async def health_check(request):
+    return web.Response(text="Bot is ALIVE and Running 24/7!")
+
+async def start_web_server():
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    # Binds to 0.0.0.0 and PORT (8080 by default)
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+
+# ================= MAIN =================
+def main():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(init_db())
+
+    application = Application.builder().token(TOKEN).build()
+    
+    # Add Handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("broadcast", broadcast_command))
+    application.add_handler(CommandHandler("setlink", set_anime_link))
+    application.add_handler(CommandHandler("deletelink", delete_anime_link))
+    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, start))
+
+    # The Logic: Run 'auto_blog_job' every 600 seconds (10 mins)
+    application.job_queue.run_repeating(auto_blog_job, interval=600, first=10)
+    
+    loop.create_task(start_web_server())
+    print(f"🚀 Bot is running on port {PORT}...")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == "__main__":
+    main()
