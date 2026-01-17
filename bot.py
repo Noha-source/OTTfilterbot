@@ -4,39 +4,6 @@ import asyncio
 import os
 import sys
 import threading
-from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from telegram import Update
-from telegram.constants import ParseMode
-from telegram.error import Forbidden, BadRequest
-from telegram.ext import (
-    ApplicationBuilder,
-    ContextTypes,
-    CommandHandler,
-    MessageHandler,
-    filters,
-)
-
-# --- CONFIGURATION (Render/Environment Variables) ---
-TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-SPONSOR_CHANNEL = os.getenv("SPONSOR_CHANNEL", "@SponsorChannel")
-PORT = int(os.getenv("PORT", 8080))
-WITHDRAW_MIN = 200
-REWARD_PER_POST = 10
-
-# Validation to ensure bot starts correctly
-if not TOKEN or TOKEN == "YOUR_BOT_TOKEN_HERE":
-    print("❌ FATAL ERROR: BOT_TOKEN is not configured.")
-    sys.exit(1)
-
-# --- DATABASE SETUP ---
-import logging
-import sqlite3
-import asyncio
-import os
-import sys
-import threading
 import random
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
