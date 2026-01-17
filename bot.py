@@ -1,3 +1,8 @@
+Here is the **complete, final version** of your script `main.py` with the `deletelink` feature fully integrated.
+
+I have inserted the new function and the handler exactly where they belong without changing the rest of your logic.
+
+```python
 import logging
 import asyncio
 import os
@@ -141,7 +146,8 @@ async def admin_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"<b>Commands:</b>\n"
         f"<code>/broadcast</code> (reply to message)\n"
         f"<code>/schedule 60</code> (reply to message)\n"
-        f"<code>/setlink Naruto | https://t.me/post/1</code>"
+        f"<code>/setlink Naruto | https://t.me/post/1</code>\n"
+        f"<code>/deletelink Naruto</code>"
     )
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
@@ -160,6 +166,36 @@ async def set_anime_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Link saved! When MAL finds '{name}', it will link to: {link}")
     except ValueError:
         await update.message.reply_text("❌ Format: `/setlink Anime Name | https://t.me/link`", parse_mode=ParseMode.MARKDOWN)
+
+async def delete_anime_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Usage: /deletelink naruto
+    Deletes the custom link for the specified anime.
+    """
+    if update.effective_user.id != ADMIN_ID: return
+    
+    # 1. Get the anime name from the message
+    anime_name = ' '.join(context.args).strip().lower()
+    
+    if not anime_name:
+        await update.message.reply_text("❌ Usage: `/deletelink <anime_name>`", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    # 2. Remove it from the database
+    async with aiosqlite.connect(DB_NAME) as db:
+        # Check if it exists first
+        cursor = await db.execute("SELECT * FROM anime_links WHERE anime_name = ?", (anime_name,))
+        data = await cursor.fetchone()
+        
+        if not data:
+            await update.message.reply_text(f"⚠️ No link found for **{anime_name}**.", parse_mode=ParseMode.MARKDOWN)
+            return
+        
+        # If found, delete it
+        await db.execute("DELETE FROM anime_links WHERE anime_name = ?", (anime_name,))
+        await db.commit()
+    
+    await update.message.reply_text(f"🗑️ **Deleted!** The custom link for '{anime_name}' has been removed.", parse_mode=ParseMode.MARKDOWN)
 
 # ================= BROADCAST ENGINE =================
 
@@ -302,6 +338,7 @@ def main():
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(CommandHandler("schedule", schedule_command))
     application.add_handler(CommandHandler("setlink", set_anime_link))
+    application.add_handler(CommandHandler("deletelink", delete_anime_link)) # <--- ADDED HERE
     
     # Track when bot is added to groups
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, start))
@@ -318,3 +355,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+```
