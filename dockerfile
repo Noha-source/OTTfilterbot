@@ -1,33 +1,31 @@
-# Use a lightweight Python base image
-FROM python:3.10-slim
+# Use an official lightweight Python image
+# Specifying the platform ensures compatibility with Render's linux/amd64 environment
+FROM --platform=linux/amd64 python:3.11-slim
+
+# Set environment variables to optimize Python for containers
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 # Set the working directory inside the container
 WORKDIR /app
 
-# Set environment variables
-# PYTHONDONTWRITEBYTECODE: Prevents Python from writing .pyc files
-# PYTHONUNBUFFERED: Ensures logs are printed immediately to the console
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    TZ=Asia/Kolkata
-
-# Install system dependencies (needed for some Python packages)
-# We also install 'tzdata' to ensure the scheduler respects the Timezone
-RUN apt-get update && apt-get install -y \
-    tzdata \
+# Install system dependencies if needed (e.g., for sqlite or networking)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the requirements file first (better for Docker caching)
+# Copy only the requirements file first to leverage Docker caching
 COPY requirements.txt .
 
 # Install Python dependencies
+# The --no-cache-dir flag keeps the image size small
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the rest of the application code
+# Copy the rest of your bot's code into the container
 COPY . .
 
-# Define the volume for the SQLite database so data persists
-VOLUME ["/app/data"]
+# Expose the port your health check server uses (usually 8080)
+EXPOSE 8080
 
 # Command to run the bot
 CMD ["python", "bot.py"]
