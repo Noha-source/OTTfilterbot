@@ -1,1 +1,3 @@
-pip install python-telegram-bot apscheduler jikanpy aiosqlite
+#!/bin/bash
+echo "🚀 Starting Anime Bot..."
+python main.py
