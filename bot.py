@@ -1,15 +1,23 @@
+Here is the updated script. I have **removed `jikanpy**` and replaced the `auto_blog_job` logic with **AniList GraphQL** queries.
+
+I have kept the database, broadcasting system, web server, and all admin commands exactly as they were.
+
+### `main.py`
+
+```python
 import logging
 import asyncio
 import os
 import sys
+import random  # Added for random page selection
 from datetime import datetime, timedelta
-from aiohttp import web
+from aiohttp import web, ClientSession  # Added ClientSession for GraphQL requests
 import aiosqlite
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.constants import ParseMode
 from telegram.error import Forbidden
-from jikanpy import AioJikan
+# Removed: from jikanpy import AioJikan
 
 # ================= CONFIGURATION =================
 # These are loaded from Render Environment Variables.
@@ -254,51 +262,87 @@ async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except (IndexError, ValueError):
         await update.message.reply_text("❌ Usage: `/schedule <minutes>`", parse_mode=ParseMode.MARKDOWN)
 
-# ================= AI AUTO-POST (MYANIMELIST) =================
+# ================= AI AUTO-POST (ANILIST GRAPHQL) =================
 
 async def auto_blog_job(context: ContextTypes.DEFAULT_TYPE):
-    """Runs every 10 minutes to fetch and post anime."""
-    jikan = AioJikan()
+    """Runs every 10 minutes to fetch and post anime using AniList GraphQL."""
+    
+    # 1. Setup AniList GraphQL Query
+    url = 'https://graphql.anilist.co'
+    random_page = random.randint(1, 50) # Pick a random page of popular anime
+    
+    query = '''
+    query ($page: Int) {
+      Page (page: $page, perPage: 1) {
+        media (type: ANIME, sort: POPULARITY_DESC) {
+          title { romaji english }
+          coverImage { extraLarge }
+          bannerImage
+          description
+          averageScore
+          siteUrl
+        }
+      }
+    }
+    '''
+    
     try:
-        # Fetch a random anime
-        response = await jikan.random(type='anime')
-        anime = response.get('data')
-        
+        # 2. Fetch Data from AniList
+        async with ClientSession() as session:
+            async with session.post(url, json={'query': query, 'variables': {'page': random_page}}) as resp:
+                data = await resp.json()
+                anime = data['data']['Page']['media'][0]
+
         if not anime: return
 
-        # Extract Details
-        title = anime.get('title', 'Unknown Title')
-        english_title = anime.get('title_english')
-        score = anime.get('score', 'N/A')
-        synopsis = anime.get('synopsis', 'No description available.')
-        image_url = anime['images']['jpg']['large_image_url']
-        url = anime.get('url', '')
-
+        # 3. Extract & Format Details
+        title_romaji = anime['title']['romaji']
+        title_english = anime['title']['english']
+        
+        # Prefer English title if available, else Romaji
+        final_title = title_english if title_english else title_romaji
+        
+        score = anime.get('averageScore', 'N/A')
+        if score != 'N/A': score = f"{score}%" # AniList uses 0-100
+        
+        # Clean HTML from description
+        synopsis = anime.get('description', 'No description available.')
+        if synopsis:
+            synopsis = synopsis.replace('<br>', '\n').replace('<i>', '').replace('</i>', '')
+        
         # Shorten synopsis
         if len(synopsis) > 400: synopsis = synopsis[:400] + "..."
 
-        # Logic: Check if we have this in our channel
-        channel_link = await get_custom_link(title)
-        if not channel_link and english_title:
-             channel_link = await get_custom_link(english_title)
+        # 4. Image Logic (Prefer Banner, Fallback to Poster)
+        image_url = anime.get('bannerImage')
+        if not image_url:
+            image_url = anime['coverImage']['extraLarge']
+            
+        site_url = anime.get('siteUrl', '')
 
-        # Build Post
-        caption = f"🎬 <b>{title}</b>"
-        if english_title: caption += f" ({english_title})"
+        # 5. Check Custom Link in Database
+        channel_link = await get_custom_link(final_title)
+        if not channel_link and title_romaji:
+             channel_link = await get_custom_link(title_romaji)
+
+        # 6. Build Caption
+        caption = f"🎬 <b>{final_title}</b>"
+        if title_english and title_english != title_romaji: 
+            caption += f" ({title_romaji})"
         caption += "\n━━━━━━━━━━━━━━━━━━\n"
-        caption += f"⭐ <b>Rating:</b> {score}/10\n"
+        caption += f"⭐ <b>Rating:</b> {score}\n"
         caption += f"📝 <b>Description:</b> {synopsis}\n\n"
 
         if channel_link:
             caption += f"📺 <b>WATCH HERE: <a href='{channel_link}'>{CHANNEL_NAME}</a></b>\n"
         else:
-            caption += f"📺 <b>Where to watch:</b> Check <a href='{url}'>MyAnimeList</a>\n"
+            caption += f"📺 <b>Where to watch:</b> Check <a href='{site_url}'>AniList</a>\n"
 
         caption += "\n━━━━━━━━━━━━━━━━━━\n"
         caption += f"📣 Ads sponsored by <b><a href='{CHANNEL_LINK}'>{CHANNEL_NAME}</a></b>\n"
         caption += f"⚠️ <i>We do not do any copyright thing but only gives recommendation to subscribers to watch it.</i>"
 
-        # Broadcast
+        # 7. Broadcast
         targets = await get_all_chats()
         for chat_id in targets:
             try:
@@ -313,8 +357,6 @@ async def auto_blog_job(context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         logger.error(f"Auto-Blog Error: {e}")
-    finally:
-        await jikan.close()
 
 # ================= MAIN ENTRY POINT =================
 
@@ -350,3 +392,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+```
