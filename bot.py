@@ -19,9 +19,6 @@ CHANNEL_LINK = os.getenv('CHANNEL_LINK', 'https://t.me/your_channel_link')
 PORT = int(os.getenv('PORT', 8080))
 DB_NAME = "bot_data.db"
 
-# --- ANILIST API KEY ---
-ANILIST_API_KEY = 'Tc7EZODlyrHc5ZuDps3Jr4JWsxWCqoqzFbrPWJzr'
-
 # ================= LOGGING =================
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -54,68 +51,58 @@ async def get_custom_link(anime_title):
         row = await cursor.fetchone()
         return row[0] if row else None
 
-# ================= ANILIST API ENGINE =================
-async def fetch_random_anilist_data():
-    url = 'https://graphql.anilist.co'
-    random_page = random.randint(1, 50) 
-    query = '''
-    query ($page: Int) {
-      Page (page: $page, perPage: 1) {
-        media (type: ANIME, sort: POPULARITY_DESC) {
-          title { romaji english }
-          coverImage { extraLarge }
-          bannerImage
-          description
-          averageScore
-          siteUrl
-        }
-      }
-    }
-    '''
-    headers = {
-        'Authorization': f'Bearer {ANILIST_API_KEY}',
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-    }
+# ================= JIKAN REST API ENGINE =================
+async def fetch_random_anime_data():
+    """Fetches a random anime using the Jikan REST API (No Key/GraphQL needed)."""
+    url = 'https://api.jikan.moe/v4/random/anime'
+    
     async with ClientSession() as session:
         try:
-            async with session.post(url, json={'query': query, 'variables': {'page': random_page}}, headers=headers) as resp:
+            async with session.get(url) as resp:
                 if resp.status != 200:
-                    logger.error(f"AniList API Error {resp.status}")
+                    logger.error(f"Jikan API Error {resp.status}")
                     return None
-                data = await resp.json()
-                media = data['data']['Page']['media']
-                return media[0] if media else None
+                
+                res_json = await resp.json()
+                data = res_json.get('data')
+                if not data: return None
+
+                # Formatting to match your existing post logic
+                return {
+                    'title': data.get('title'),
+                    'title_japanese': data.get('title_japanese'),
+                    'image': data.get('images', {}).get('jpg', {}).get('large_image_url'),
+                    'score': data.get('score'),
+                    'synopsis': data.get('synopsis'),
+                    'url': data.get('url')
+                }
         except Exception as e:
-            logger.error(f"AniList Connection Error: {e}")
+            logger.error(f"Jikan Connection Error: {e}")
             return None
 
 # ================= AUTO POST LOGIC =================
 async def send_anime_post(bot, chat_id):
-    """Helper function to send a post to a specific chat."""
-    anime = await fetch_random_anilist_data()
+    anime = await fetch_random_anime_data()
     if not anime: return
 
-    title_romaji = anime['title']['romaji']
-    title_english = anime['title']['english']
-    final_title = title_english if title_english else title_romaji
+    title = anime['title']
+    title_jp = anime['title_japanese']
+    score = f"{anime['score']}/10" if anime['score'] else "N/A"
     
-    score = anime.get('averageScore', 'N/A')
-    if score != 'N/A': score = f"{score}%"
-    
-    desc = anime.get('description', 'No description available.')
-    if desc:
-        desc = desc.replace('<br>', '\n').replace('<i>', '').replace('</i>', '')
+    desc = anime['synopsis'] or "No description available."
     if len(desc) > 350: desc = desc[:350] + "..."
 
-    image_url = anime.get('bannerImage') or anime['coverImage']['extraLarge']
-    site_url = anime.get('siteUrl')
+    image_url = anime['image']
+    site_url = anime['url']
+    
+    # Check custom links
+    channel_link = await get_custom_link(title)
+    if not channel_link and title_jp:
+        channel_link = await get_custom_link(title_jp)
 
-    channel_link = await get_custom_link(final_title) or await get_custom_link(title_romaji)
-
-    caption = f"🎬 <b>{final_title}</b>\n"
-    if title_english and title_english != title_romaji:
-        caption += f"<i>({title_romaji})</i>\n"
+    caption = f"🎬 <b>{title}</b>\n"
+    if title_jp:
+        caption += f"<i>({title_jp})</i>\n"
     
     caption += f"━━━━━━━━━━━━━━━━━━\n"
     caption += f"⭐ <b>Rating:</b> {score}\n"
@@ -124,7 +111,7 @@ async def send_anime_post(bot, chat_id):
     if channel_link:
         caption += f"📺 <b>WATCH HERE: <a href='{channel_link}'>{CHANNEL_NAME}</a></b>\n"
     else:
-        caption += f"📺 <b>Where to watch:</b> Check <a href='{site_url}'>AniList</a>\n"
+        caption += f"📺 <b>Where to watch:</b> Check <a href='{site_url}'>MyAnimeList</a>\n"
 
     caption += f"\n━━━━━━━━━━━━━━━━━━\n"
     caption += f"📣 Ads sponsored by <b><a href='{CHANNEL_LINK}'>{CHANNEL_NAME}</a></b>\n"
@@ -133,13 +120,13 @@ async def send_anime_post(bot, chat_id):
     try:
         await bot.send_photo(chat_id=chat_id, photo=image_url, caption=caption, parse_mode=ParseMode.HTML)
     except Exception as e:
-        logger.error(f"Error sending post to {chat_id}: {e}")
+        logger.error(f"Send failure to {chat_id}: {e}")
 
 async def auto_blog_job(context: ContextTypes.DEFAULT_TYPE):
-    """The background job for all users every 10 mins."""
     targets = await get_all_chats()
     for chat_id in targets:
         await send_anime_post(context.bot, chat_id)
+        await asyncio.sleep(1) 
 
 # ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -152,7 +139,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "✨ <i>Sit back, relax, and let the anime come to you!</i>"
     )
 
-    # 1. Register User/Group in Database
     if chat.type == 'private':
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (chat.id,))
@@ -163,10 +149,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await db.execute("INSERT OR IGNORE INTO groups (chat_id, title) VALUES (?, ?)", (chat.id, chat.title))
             await db.commit()
 
-    # 2. Send Welcome Message
     await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
     
-    # 3. IMMEDIATELY send the first random anime post
+    # IMMEDIATE START POST
     await update.message.reply_text("🚀 <b>Fetching your first recommendation...</b>", parse_mode=ParseMode.HTML)
     await send_anime_post(context.bot, chat.id)
 
@@ -226,10 +211,11 @@ async def main():
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, start))
 
     if application.job_queue:
+        # Schedule every 10 minutes
         application.job_queue.run_repeating(auto_blog_job, interval=600, first=10)
-        logger.info("Auto-post job scheduled.")
+        logger.info("Auto-post job active.")
     else:
-        logger.error("JobQueue unavailable.")
+        logger.error("JobQueue unavailable. Ensure 'python-telegram-bot[job-queue]' is installed.")
 
     await start_web_server()
 
@@ -237,7 +223,7 @@ async def main():
         await application.initialize()
         await application.start()
         await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
-        logger.info(f"🚀 Bot is running on port {PORT}...")
+        logger.info(f"🚀 Bot online on port {PORT}...")
         while True:
             await asyncio.sleep(1)
 
@@ -246,3 +232,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         pass
+        
