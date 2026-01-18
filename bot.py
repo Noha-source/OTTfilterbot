@@ -16,7 +16,6 @@ TOKEN = os.getenv('TOKEN', 'YOUR_BOT_TOKEN_HERE')
 ADMIN_ID = int(os.getenv('ADMIN_ID', '123456789')) 
 CHANNEL_NAME = os.getenv('CHANNEL_NAME', 'My Anime Channel')
 CHANNEL_LINK = os.getenv('CHANNEL_LINK', 'https://t.me/your_channel_link')
-# This line ensures it runs on Port 8080 locally, or whatever Port Render assigns
 PORT = int(os.getenv('PORT', 8080))
 DB_NAME = "bot_data.db"
 
@@ -57,14 +56,8 @@ async def get_custom_link(anime_title):
 
 # ================= ANILIST API ENGINE =================
 async def fetch_random_anilist_data():
-    """
-    Fetches a random anime from AniList using the provided API Key.
-    """
     url = 'https://graphql.anilist.co'
-    
-    # Logic: Pick a random page (1-50) of 'Most Popular' anime to get high-quality recommendations
     random_page = random.randint(1, 50) 
-    
     query = '''
     query ($page: Int) {
       Page (page: $page, perPage: 1) {
@@ -79,39 +72,30 @@ async def fetch_random_anilist_data():
       }
     }
     '''
-    
-    # Headers with your API Key
     headers = {
         'Authorization': f'Bearer {ANILIST_API_KEY}',
         'Content-Type': 'application/json',
         'Accept': 'application/json'
     }
-
     async with ClientSession() as session:
         try:
             async with session.post(url, json={'query': query, 'variables': {'page': random_page}}, headers=headers) as resp:
                 if resp.status != 200:
-                    logger.error(f"AniList API Error {resp.status}: Check if API Key is valid.")
+                    logger.error(f"AniList API Error {resp.status}")
                     return None
-                    
                 data = await resp.json()
                 media = data['data']['Page']['media']
-                if media:
-                    return media[0]
-                return None
+                return media[0] if media else None
         except Exception as e:
             logger.error(f"AniList Connection Error: {e}")
             return None
 
-# ================= AUTO POST JOB =================
-async def auto_blog_job(context: ContextTypes.DEFAULT_TYPE):
-    """The function that runs automatically every 10 minutes."""
-    
-    # 1. Get Anime Data
+# ================= AUTO POST LOGIC =================
+async def send_anime_post(bot, chat_id):
+    """Helper function to send a post to a specific chat."""
     anime = await fetch_random_anilist_data()
     if not anime: return
 
-    # 2. Extract Info
     title_romaji = anime['title']['romaji']
     title_english = anime['title']['english']
     final_title = title_english if title_english else title_romaji
@@ -119,22 +103,16 @@ async def auto_blog_job(context: ContextTypes.DEFAULT_TYPE):
     score = anime.get('averageScore', 'N/A')
     if score != 'N/A': score = f"{score}%"
     
-    # Clean up description (Remove HTML tags like <br>)
     desc = anime.get('description', 'No description available.')
     if desc:
         desc = desc.replace('<br>', '\n').replace('<i>', '').replace('</i>', '')
     if len(desc) > 350: desc = desc[:350] + "..."
 
-    # Use Wide Banner if available, else Poster
     image_url = anime.get('bannerImage') or anime['coverImage']['extraLarge']
     site_url = anime.get('siteUrl')
 
-    # 3. Database Check (Your Custom Links)
-    channel_link = await get_custom_link(final_title)
-    if not channel_link and title_romaji:
-         channel_link = await get_custom_link(title_romaji)
+    channel_link = await get_custom_link(final_title) or await get_custom_link(title_romaji)
 
-    # 4. Create Post
     caption = f"🎬 <b>{final_title}</b>\n"
     if title_english and title_english != title_romaji:
         caption += f"<i>({title_romaji})</i>\n"
@@ -143,7 +121,6 @@ async def auto_blog_job(context: ContextTypes.DEFAULT_TYPE):
     caption += f"⭐ <b>Rating:</b> {score}\n"
     caption += f"📝 <b>Story:</b> {desc}\n\n"
 
-    # Where to watch logic
     if channel_link:
         caption += f"📺 <b>WATCH HERE: <a href='{channel_link}'>{CHANNEL_NAME}</a></b>\n"
     else:
@@ -153,40 +130,45 @@ async def auto_blog_job(context: ContextTypes.DEFAULT_TYPE):
     caption += f"📣 Ads sponsored by <b><a href='{CHANNEL_LINK}'>{CHANNEL_NAME}</a></b>\n"
     caption += f"⚠️ <i>We do not do any copyright thing but only gives recommendation to subscribers to watch it.</i>"
 
-    # 5. Broadcast
+    try:
+        await bot.send_photo(chat_id=chat_id, photo=image_url, caption=caption, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        logger.error(f"Error sending post to {chat_id}: {e}")
+
+async def auto_blog_job(context: ContextTypes.DEFAULT_TYPE):
+    """The background job for all users every 10 mins."""
     targets = await get_all_chats()
     for chat_id in targets:
-        try:
-            await context.bot.send_photo(chat_id=chat_id, photo=image_url, caption=caption, parse_mode=ParseMode.HTML)
-        except Exception:
-            pass 
+        await send_anime_post(context.bot, chat_id)
 
 # ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
-    
-    # --- UPDATED WELCOME MESSAGE ---
     welcome_text = (
         "🌟 <b>Konnichiwa,</b> 🌟\n\n"
         "Welcome to the <b>Ultimate Anime Broadcast Bot</b>.\n\n"
         "🤖 <b>What do I do?</b>\n"
         "• I deliver the hottest Anime recommendations every 10 minutes.\n"
-        "• I notify you about updates from <b>MY ANIME ENGLISH DUB</b>.\n"
-        "• I bring you direct links to watch your favorite shows.\n\n"
         "✨ <i>Sit back, relax, and let the anime come to you!</i>"
     )
 
+    # 1. Register User/Group in Database
     if chat.type == 'private':
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (chat.id,))
             await db.execute("UPDATE users SET status='active' WHERE user_id=?", (chat.id,))
             await db.commit()
-        await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
     else:
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute("INSERT OR IGNORE INTO groups (chat_id, title) VALUES (?, ?)", (chat.id, chat.title))
             await db.commit()
-        await update.message.reply_text("✅ <b>Bot Activated in this Group!</b>", parse_mode=ParseMode.HTML)
+
+    # 2. Send Welcome Message
+    await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
+    
+    # 3. IMMEDIATELY send the first random anime post
+    await update.message.reply_text("🚀 <b>Fetching your first recommendation...</b>", parse_mode=ParseMode.HTML)
+    await send_anime_post(context.bot, chat.id)
 
 async def set_anime_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
@@ -198,7 +180,7 @@ async def set_anime_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await db.commit()
         await update.message.reply_text(f"✅ Saved link for: {name.strip()}")
     except:
-        await update.message.reply_text("❌ Format: `/setlink Name | Link`", parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text("❌ Format: `/setlink Name | Link`")
 
 async def delete_anime_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
@@ -222,38 +204,45 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ================= WEB SERVER =================
 async def health_check(request):
-    return web.Response(text="Bot is ALIVE and Running 24/7!")
+    return web.Response(text="Bot is ALIVE!")
 
 async def start_web_server():
     app = web.Application()
     app.router.add_get('/', health_check)
     runner = web.AppRunner(app)
     await runner.setup()
-    # Binds to 0.0.0.0 and PORT (8080 by default)
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
 
 # ================= MAIN =================
-def main():
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(init_db())
-
+async def main():
+    await init_db()
     application = Application.builder().token(TOKEN).build()
     
-    # Add Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(CommandHandler("setlink", set_anime_link))
     application.add_handler(CommandHandler("deletelink", delete_anime_link))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, start))
 
-    # The Logic: Run 'auto_blog_job' every 600 seconds (10 mins)
-    application.job_queue.run_repeating(auto_blog_job, interval=600, first=10)
-    
-    loop.create_task(start_web_server())
-    print(f"🚀 Bot is running on port {PORT}...")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    if application.job_queue:
+        application.job_queue.run_repeating(auto_blog_job, interval=600, first=10)
+        logger.info("Auto-post job scheduled.")
+    else:
+        logger.error("JobQueue unavailable.")
+
+    await start_web_server()
+
+    async with application:
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+        logger.info(f"🚀 Bot is running on port {PORT}...")
+        while True:
+            await asyncio.sleep(1)
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        pass
