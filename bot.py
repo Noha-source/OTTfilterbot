@@ -1,4 +1,4 @@
-import logging
+    import logging
 import asyncio
 import os
 import sys
@@ -51,45 +51,65 @@ async def get_custom_link(anime_title):
         row = await cursor.fetchone()
         return row[0] if row else None
 
-# ================= JIKAN REST API ENGINE =================
+# ================= ANILIST GRAPHQL API ENGINE =================
 async def fetch_random_anime_data():
-    """Fetches a random anime using the Jikan REST API."""
-    url = 'https://api.jikan.moe/v4/random/anime'
+    """Fetches a random anime using the AniList GraphQL API."""
+    url = 'https://graphql.anilist.co'
+    random_page = random.randint(1, 100) 
+    
+    query = '''
+    query ($page: Int) {
+      Page (page: $page, perPage: 1) {
+        media (type: ANIME, sort: POPULARITY_DESC) {
+          title { romaji english native }
+          coverImage { extraLarge }
+          bannerImage
+          description
+          averageScore
+          siteUrl
+        }
+      }
+    }
+    '''
     
     async with ClientSession() as session:
         try:
-            async with session.get(url) as resp:
+            async with session.post(url, json={'query': query, 'variables': {'page': random_page}}) as resp:
                 if resp.status != 200:
-                    logger.error(f"Jikan API Error {resp.status}")
+                    logger.error(f"AniList API Error {resp.status}")
                     return None
                 
                 res_json = await resp.json()
-                data = res_json.get('data')
-                if not data: return None
-
+                media = res_json.get('data', {}).get('Page', {}).get('media')
+                if not media: return None
+                
+                data = media[0]
                 return {
-                    'title': data.get('title'),
-                    'title_japanese': data.get('title_japanese'),
-                    'image': data.get('images', {}).get('jpg', {}).get('large_image_url'),
-                    'score': data.get('score'),
-                    'synopsis': data.get('synopsis'),
-                    'url': data.get('url')
+                    'title': data['title'].get('english') or data['title'].get('romaji'),
+                    'title_japanese': data['title'].get('native'),
+                    'image': data.get('bannerImage') or data.get('coverImage', {}).get('extraLarge'),
+                    'score': data.get('averageScore'),
+                    'synopsis': data.get('description'),
+                    'url': data.get('siteUrl')
                 }
         except Exception as e:
-            logger.error(f"Jikan Connection Error: {e}")
+            logger.error(f"AniList Connection Error: {e}")
             return None
 
 # ================= AUTO POST LOGIC =================
 async def send_anime_post(bot, chat_id):
-    """Modified to use Jikan data while keeping the bold formatting and sponsored links."""
+    """Fetches AniList data while keeping the bold formatting and sponsored links."""
     anime = await fetch_random_anime_data()
     if not anime: return
 
     title = anime['title']
     title_jp = anime['title_japanese']
-    score = f"{anime['score']}/10" if anime['score'] else "N/A"
+    score = f"{anime['score']}%" if anime['score'] else "N/A"
     
+    # Clean up HTML tags often found in AniList descriptions
     desc = anime['synopsis'] or "No description available."
+    if desc:
+        desc = desc.replace('<br>', '\n').replace('<i>', '').replace('</i>', '').replace('<b>', '').replace('</b>', '')
     if len(desc) > 350: desc = desc[:350] + "..."
 
     image_url = anime['image']
@@ -100,7 +120,7 @@ async def send_anime_post(bot, chat_id):
     if not channel_link and title_jp:
         channel_link = await get_custom_link(title_jp)
 
-    # STRICT BOLD FORMATTING AS REQUESTED
+    # STRICT BOLD FORMATTING
     caption = f"🎬 <b>{title}</b>\n"
     if title_jp:
         caption += f"<i>({title_jp})</i>\n"
@@ -113,8 +133,7 @@ async def send_anime_post(bot, chat_id):
     if channel_link:
         caption += f"📺 <b>WATCH HERE: <a href='{channel_link}'>{CHANNEL_NAME}</a></b>\n"
     else:
-        # Replaced MyAnimeList with Anilist link as requested in prompt context
-        caption += f"📺 <b>Where to watch:</b> Check <a href='{site_url}'>Anilist</a>\n"
+        caption += f"📺 <b>Where to watch:</b> Check <a href='{site_url}'>AniList</a>\n"
 
     caption += f"\n━━━━━━━━━━━━━━━━━━\n"
     # SPONSORED BY ADMIN CHANNEL
@@ -156,7 +175,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
     
     # IMMEDIATE START POST
-    await update.message.reply_text("🚀 <b>Fetching your first recommendation...</b>", parse_mode=ParseMode.HTML)
+    await update.message.reply_text("🚀 <b>Fetching your first recommendation from AniList...</b>", parse_mode=ParseMode.HTML)
     await send_anime_post(context.bot, chat.id)
 
 async def set_anime_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -236,3 +255,4 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         pass
+        
