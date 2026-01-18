@@ -14,6 +14,8 @@ from telegram.error import Forbidden
 # ================= CONFIGURATION =================
 TOKEN = os.getenv('TOKEN', 'YOUR_BOT_TOKEN_HERE') 
 ADMIN_ID = int(os.getenv('ADMIN_ID', '123456789')) 
+# New Config for specific channel scheduling
+MAIN_CHANNEL_ID = int(os.getenv('MAIN_CHANNEL_ID', '-1001234567890')) 
 CHANNEL_NAME = os.getenv('CHANNEL_NAME', 'My Anime Channel')
 CHANNEL_LINK = os.getenv('CHANNEL_LINK', 'https://t.me/your_channel_link')
 PORT = int(os.getenv('PORT', 8080))
@@ -32,6 +34,14 @@ async def init_db():
         await db.execute('''CREATE TABLE IF NOT EXISTS users (user_id INTEGER PRIMARY KEY, status TEXT DEFAULT 'active')''')
         await db.execute('''CREATE TABLE IF NOT EXISTS groups (chat_id INTEGER PRIMARY KEY, title TEXT)''')
         await db.execute('''CREATE TABLE IF NOT EXISTS anime_links (anime_name TEXT PRIMARY KEY, post_link TEXT)''')
+        # NEW: Table for scheduled posts
+        await db.execute('''CREATE TABLE IF NOT EXISTS scheduled_posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            message_id INTEGER,
+            run_date TEXT,
+            target_mode TEXT
+        )''')
         await db.commit()
 
 async def get_all_chats():
@@ -126,6 +136,92 @@ async def auto_blog_job(context: ContextTypes.DEFAULT_TYPE):
         await send_anime_post(context.bot, chat_id)
         await asyncio.sleep(1) 
 
+# ================= SCHEDULER LOGIC (NEW) =================
+async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    
+    reply = update.message.reply_to_message
+    if not reply:
+        await update.message.reply_text("❌ <b>Reply to a message to schedule it.</b>", parse_mode=ParseMode.HTML)
+        return
+
+    # Syntax: /schedule YYYY-MM-DD HH:MM [all/channel]
+    try:
+        args = context.args
+        if len(args) < 2:
+            raise ValueError("Not enough arguments")
+        
+        date_str = args[0]
+        time_str = args[1]
+        target_mode = args[2].lower() if len(args) > 2 else 'all' # Default to broadcast ALL
+        
+        # Validation
+        if target_mode not in ['all', 'channel']:
+            await update.message.reply_text("❌ Mode must be `all` (broadcast) or `channel` (single).")
+            return
+
+        run_date_str = f"{date_str} {time_str}"
+        # Validate datetime format
+        datetime.strptime(run_date_str, "%Y-%m-%d %H:%M")
+        
+        async with aiosqlite.connect(DB_NAME) as db:
+            await db.execute(
+                "INSERT INTO scheduled_posts (chat_id, message_id, run_date, target_mode) VALUES (?, ?, ?, ?)",
+                (update.effective_chat.id, reply.message_id, run_date_str, target_mode)
+            )
+            await db.commit()
+            
+        await update.message.reply_text(
+            f"✅ <b>Post Scheduled!</b>\n\n"
+            f"📅 <b>Time:</b> {run_date_str}\n"
+            f"🎯 <b>Mode:</b> {target_mode.upper()}\n"
+            f"(Will run when server time matches)",
+            parse_mode=ParseMode.HTML
+        )
+    except ValueError:
+        await update.message.reply_text(
+            "❌ <b>Format Error!</b>\n"
+            "Use: `/schedule YYYY-MM-DD HH:MM [all/channel]`\n"
+            "Example: `/schedule 2024-05-20 14:30 all`", 
+            parse_mode=ParseMode.HTML
+        )
+
+async def check_scheduled_posts_job(context: ContextTypes.DEFAULT_TYPE):
+    """Checks DB every minute for posts that need to be sent"""
+    current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+    
+    async with aiosqlite.connect(DB_NAME) as db:
+        # Get posts where time is now or passed
+        cursor = await db.execute("SELECT id, chat_id, message_id, target_mode FROM scheduled_posts WHERE run_date <= ?", (current_time,))
+        posts = await cursor.fetchall()
+        
+        for post in posts:
+            pid, from_chat_id, msg_id, mode = post
+            
+            # MODE: CHANNEL (Only post to Main Channel)
+            if mode == 'channel':
+                try:
+                    await context.bot.copy_message(chat_id=MAIN_CHANNEL_ID, from_chat_id=from_chat_id, message_id=msg_id)
+                except Exception as e:
+                    logger.error(f"Failed to post schedule to channel: {e}")
+            
+            # MODE: ALL (Broadcast to Database Users + Groups)
+            elif mode == 'all':
+                targets = await get_all_chats()
+                for chat_id in targets:
+                    try:
+                        await context.bot.copy_message(chat_id=chat_id, from_chat_id=from_chat_id, message_id=msg_id)
+                        await asyncio.sleep(0.5) # Flood limit protection
+                    except Forbidden:
+                        await mark_inactive(chat_id)
+                    except Exception as e:
+                        logger.error(f"Scheduled broadcast fail for {chat_id}: {e}")
+
+            # Delete processed post
+            await db.execute("DELETE FROM scheduled_posts WHERE id = ?", (pid,))
+        
+        await db.commit()
+
 # ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -216,15 +312,20 @@ async def main():
     application = Application.builder().token(TOKEN).build()
     
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("stats", stats_command)) # Added stats handler
+    application.add_handler(CommandHandler("stats", stats_command)) 
     application.add_handler(CommandHandler("broadcast", broadcast_command))
+    # New Schedule Handler
+    application.add_handler(CommandHandler("schedule", schedule_command))
     application.add_handler(CommandHandler("setlink", set_anime_link))
     application.add_handler(CommandHandler("deletelink", delete_anime_link))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, start))
 
     if application.job_queue:
+        # Existing Auto Blog Job
         application.job_queue.run_repeating(auto_blog_job, interval=600, first=10)
-        logger.info("Auto-post job active.")
+        # New Scheduler Check Job (Every 60 seconds)
+        application.job_queue.run_repeating(check_scheduled_posts_job, interval=60, first=5)
+        logger.info("Auto-post and Scheduler jobs active.")
     else:
         logger.error("JobQueue unavailable.")
 
@@ -242,4 +343,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         pass
-        
