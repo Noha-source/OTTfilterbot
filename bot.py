@@ -136,7 +136,7 @@ async def auto_blog_job(context: ContextTypes.DEFAULT_TYPE):
         await send_anime_post(context.bot, chat_id)
         await asyncio.sleep(1) 
 
-# ================= SCHEDULER LOGIC (NEW) =================
+# ================= SCHEDULER LOGIC (IST 12-Hour Support) =================
 async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
     
@@ -145,73 +145,89 @@ async def schedule_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ <b>Reply to a message to schedule it.</b>", parse_mode=ParseMode.HTML)
         return
 
-    # Syntax: /schedule YYYY-MM-DD HH:MM [all/channel]
+    # Syntax: /schedule YYYY-MM-DD HH:MM AM/PM [all/channel]
     try:
         args = context.args
-        if len(args) < 2:
+        if len(args) < 3:
             raise ValueError("Not enough arguments")
         
         date_str = args[0]
         time_str = args[1]
-        target_mode = args[2].lower() if len(args) > 2 else 'all' # Default to broadcast ALL
+        meridiem = args[2].upper() # AM or PM
+        target_mode = args[3].lower() if len(args) > 3 else 'all' 
         
         # Validation
+        if meridiem not in ['AM', 'PM']:
+            await update.message.reply_text("❌ Time format must include AM or PM.\nEx: `/schedule 2024-05-20 02:30 PM all`")
+            return
+
         if target_mode not in ['all', 'channel']:
             await update.message.reply_text("❌ Mode must be `all` (broadcast) or `channel` (single).")
             return
 
-        run_date_str = f"{date_str} {time_str}"
-        # Validate datetime format
-        datetime.strptime(run_date_str, "%Y-%m-%d %H:%M")
+        # Combine input to parse 12-hour format
+        raw_input_str = f"{date_str} {time_str} {meridiem}"
+        
+        # Parse user's 12-hour IST input
+        dt_obj = datetime.strptime(raw_input_str, "%Y-%m-%d %I:%M %p")
+        
+        # Convert to standard 24-hour string for DB storage (Simplifies comparison logic)
+        db_store_date = dt_obj.strftime("%Y-%m-%d %H:%M")
         
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute(
                 "INSERT INTO scheduled_posts (chat_id, message_id, run_date, target_mode) VALUES (?, ?, ?, ?)",
-                (update.effective_chat.id, reply.message_id, run_date_str, target_mode)
+                (update.effective_chat.id, reply.message_id, db_store_date, target_mode)
             )
             await db.commit()
             
         await update.message.reply_text(
-            f"✅ <b>Post Scheduled!</b>\n\n"
-            f"📅 <b>Time:</b> {run_date_str}\n"
+            f"✅ <b>Post Scheduled (IST)!</b>\n\n"
+            f"📅 <b>Date:</b> {date_str}\n"
+            f"⏰ <b>Time:</b> {time_str} {meridiem}\n"
             f"🎯 <b>Mode:</b> {target_mode.upper()}\n"
-            f"(Will run when server time matches)",
+            f"(Will run when India time matches)",
             parse_mode=ParseMode.HTML
         )
     except ValueError:
         await update.message.reply_text(
             "❌ <b>Format Error!</b>\n"
-            "Use: `/schedule YYYY-MM-DD HH:MM [all/channel]`\n"
-            "Example: `/schedule 2024-05-20 14:30 all`", 
+            "Use: `/schedule YYYY-MM-DD HH:MM AM/PM [mode]`\n"
+            "Example: `/schedule 2024-05-20 02:30 PM all`", 
             parse_mode=ParseMode.HTML
         )
 
 async def check_scheduled_posts_job(context: ContextTypes.DEFAULT_TYPE):
-    """Checks DB every minute for posts that need to be sent"""
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
+    """Checks DB every minute using Indian Standard Time"""
+    # Get Current UTC time
+    utc_now = datetime.utcnow()
+    # Convert UTC to IST (UTC + 5:30)
+    ist_now = utc_now + timedelta(hours=5, minutes=30)
+    # Format as 24-hour string to match DB storage
+    current_ist_str = ist_now.strftime("%Y-%m-%d %H:%M")
     
     async with aiosqlite.connect(DB_NAME) as db:
-        # Get posts where time is now or passed
-        cursor = await db.execute("SELECT id, chat_id, message_id, target_mode FROM scheduled_posts WHERE run_date <= ?", (current_time,))
+        # Compare IST time with stored time
+        cursor = await db.execute("SELECT id, chat_id, message_id, target_mode FROM scheduled_posts WHERE run_date <= ?", (current_ist_str,))
         posts = await cursor.fetchall()
         
         for post in posts:
             pid, from_chat_id, msg_id, mode = post
             
-            # MODE: CHANNEL (Only post to Main Channel)
+            # MODE: CHANNEL
             if mode == 'channel':
                 try:
                     await context.bot.copy_message(chat_id=MAIN_CHANNEL_ID, from_chat_id=from_chat_id, message_id=msg_id)
                 except Exception as e:
                     logger.error(f"Failed to post schedule to channel: {e}")
             
-            # MODE: ALL (Broadcast to Database Users + Groups)
+            # MODE: ALL
             elif mode == 'all':
                 targets = await get_all_chats()
                 for chat_id in targets:
                     try:
                         await context.bot.copy_message(chat_id=chat_id, from_chat_id=from_chat_id, message_id=msg_id)
-                        await asyncio.sleep(0.5) # Flood limit protection
+                        await asyncio.sleep(0.5) 
                     except Forbidden:
                         await mark_inactive(chat_id)
                     except Exception as e:
