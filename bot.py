@@ -53,10 +53,8 @@ async def get_custom_link(anime_title):
 
 # ================= ANILIST GRAPHQL API ENGINE =================
 async def fetch_random_anime_data():
-    """Fetches a random anime using the AniList GraphQL API."""
     url = 'https://graphql.anilist.co'
     random_page = random.randint(1, 100) 
-    
     query = '''
     query ($page: Int) {
       Page (page: $page, perPage: 1) {
@@ -71,18 +69,15 @@ async def fetch_random_anime_data():
       }
     }
     '''
-    
     async with ClientSession() as session:
         try:
             async with session.post(url, json={'query': query, 'variables': {'page': random_page}}) as resp:
                 if resp.status != 200:
                     logger.error(f"AniList API Error {resp.status}")
                     return None
-                
                 res_json = await resp.json()
                 media = res_json.get('data', {}).get('Page', {}).get('media')
                 if not media: return None
-                
                 data = media[0]
                 return {
                     'title': data['title'].get('english') or data['title'].get('romaji'),
@@ -98,52 +93,32 @@ async def fetch_random_anime_data():
 
 # ================= AUTO POST LOGIC =================
 async def send_anime_post(bot, chat_id):
-    """Fetches AniList data while keeping the bold formatting and sponsored links."""
     anime = await fetch_random_anime_data()
     if not anime: return
-
     title = anime['title']
     title_jp = anime['title_japanese']
     score = f"{anime['score']}%" if anime['score'] else "N/A"
-    
-    # Clean up HTML tags often found in AniList descriptions
     desc = anime['synopsis'] or "No description available."
     if desc:
         desc = desc.replace('<br>', '\n').replace('<i>', '').replace('</i>', '').replace('<b>', '').replace('</b>', '')
     if len(desc) > 350: desc = desc[:350] + "..."
-
     image_url = anime['image']
     site_url = anime['url']
-    
-    # Check custom links in database
-    channel_link = await get_custom_link(title)
-    if not channel_link and title_jp:
-        channel_link = await get_custom_link(title_jp)
-
-    # STRICT BOLD FORMATTING
+    channel_link = await get_custom_link(title) or await get_custom_link(title_jp)
     caption = f"🎬 <b>{title}</b>\n"
     if title_jp:
         caption += f"<i>({title_jp})</i>\n"
-    
-    caption += f"━━━━━━━━━━━━━━━━━━\n"
-    caption += f"⭐ <b>Rating:</b> {score}\n"
-    caption += f"📝 <b>Story:</b> {desc}\n\n"
-
-    # WHERE TO WATCH LOGIC
+    caption += f"━━━━━━━━━━━━━━━━━━\n⭐ <b>Rating:</b> {score}\n📝 <b>Story:</b> {desc}\n\n"
     if channel_link:
         caption += f"📺 <b>WATCH HERE: <a href='{channel_link}'>{CHANNEL_NAME}</a></b>\n"
     else:
         caption += f"📺 <b>Where to watch:</b> Check <a href='{site_url}'>AniList</a>\n"
-
-    caption += f"\n━━━━━━━━━━━━━━━━━━\n"
-    # SPONSORED BY ADMIN CHANNEL
-    caption += f"📣 Ads sponsored by <b><a href='{CHANNEL_LINK}'>{CHANNEL_NAME}</a></b>\n"
+    caption += f"\n━━━━━━━━━━━━━━━━━━\n📣 Ads sponsored by <b><a href='{CHANNEL_LINK}'>{CHANNEL_NAME}</a></b>\n"
     caption += f"⚠️ <i>We do not do any copyright thing but only gives recommendation to subscribers to watch it.</i>"
-
     try:
         await bot.send_photo(chat_id=chat_id, photo=image_url, caption=caption, parse_mode=ParseMode.HTML)
     except Exception as e:
-        logger.error(f"Send failure to {chat_id}: {e}")
+        logger.error(f"Error sending post to {chat_id}: {e}")
 
 async def auto_blog_job(context: ContextTypes.DEFAULT_TYPE):
     targets = await get_all_chats()
@@ -161,7 +136,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• I deliver the hottest Anime recommendations every 10 minutes.\n"
         "✨ <i>Sit back, relax, and let the anime come to you!</i>"
     )
-
     if chat.type == 'private':
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (chat.id,))
@@ -171,12 +145,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute("INSERT OR IGNORE INTO groups (chat_id, title) VALUES (?, ?)", (chat.id, chat.title))
             await db.commit()
-
     await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
-    
-    # IMMEDIATE START POST
-    await update.message.reply_text("🚀 <b>Fetching your first recommendation from AniList...</b>", parse_mode=ParseMode.HTML)
+    await update.message.reply_text("🚀 <b>Fetching your first wide-screen recommendation...</b>", parse_mode=ParseMode.HTML)
     await send_anime_post(context.bot, chat.id)
+
+# NEW ADMIN STATS COMMAND
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID: return
+    async with aiosqlite.connect(DB_NAME) as db:
+        active = await db.execute_fetchall("SELECT COUNT(*) FROM users WHERE status='active'")
+        inactive = await db.execute_fetchall("SELECT COUNT(*) FROM users WHERE status='inactive'")
+        groups = await db.execute_fetchall("SELECT COUNT(*) FROM groups")
+        
+        text = (
+            "📊 <b>Bot Statistics</b>\n\n"
+            f"✅ <b>Active Users:</b> {active[0][0]}\n"
+            f"❌ <b>Inactive Users:</b> {inactive[0][0]}\n"
+            f"👥 <b>Total Groups:</b> {groups[0][0]}\n"
+            f"📈 <b>Total Reach:</b> {active[0][0] + groups[0][0]}"
+        )
+        await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 async def set_anime_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID: return
@@ -228,20 +216,19 @@ async def main():
     application = Application.builder().token(TOKEN).build()
     
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stats", stats_command)) # Added stats handler
     application.add_handler(CommandHandler("broadcast", broadcast_command))
     application.add_handler(CommandHandler("setlink", set_anime_link))
     application.add_handler(CommandHandler("deletelink", delete_anime_link))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, start))
 
     if application.job_queue:
-        # Schedule every 10 minutes
         application.job_queue.run_repeating(auto_blog_job, interval=600, first=10)
         logger.info("Auto-post job active.")
     else:
-        logger.error("JobQueue unavailable. Ensure 'python-telegram-bot[job-queue]' is installed.")
+        logger.error("JobQueue unavailable.")
 
     await start_web_server()
-
     async with application:
         await application.initialize()
         await application.start()
