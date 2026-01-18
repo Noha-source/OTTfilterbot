@@ -53,7 +53,7 @@ async def get_custom_link(anime_title):
 
 # ================= JIKAN REST API ENGINE =================
 async def fetch_random_anime_data():
-    """Fetches a random anime using the Jikan REST API (No Key/GraphQL needed)."""
+    """Fetches a random anime using the Jikan REST API."""
     url = 'https://api.jikan.moe/v4/random/anime'
     
     async with ClientSession() as session:
@@ -67,7 +67,6 @@ async def fetch_random_anime_data():
                 data = res_json.get('data')
                 if not data: return None
 
-                # Formatting to match your existing post logic
                 return {
                     'title': data.get('title'),
                     'title_japanese': data.get('title_japanese'),
@@ -82,6 +81,7 @@ async def fetch_random_anime_data():
 
 # ================= AUTO POST LOGIC =================
 async def send_anime_post(bot, chat_id):
+    """Modified to use Jikan data while keeping the bold formatting and sponsored links."""
     anime = await fetch_random_anime_data()
     if not anime: return
 
@@ -95,11 +95,12 @@ async def send_anime_post(bot, chat_id):
     image_url = anime['image']
     site_url = anime['url']
     
-    # Check custom links
+    # Check custom links in database
     channel_link = await get_custom_link(title)
     if not channel_link and title_jp:
         channel_link = await get_custom_link(title_jp)
 
+    # STRICT BOLD FORMATTING AS REQUESTED
     caption = f"🎬 <b>{title}</b>\n"
     if title_jp:
         caption += f"<i>({title_jp})</i>\n"
@@ -108,12 +109,15 @@ async def send_anime_post(bot, chat_id):
     caption += f"⭐ <b>Rating:</b> {score}\n"
     caption += f"📝 <b>Story:</b> {desc}\n\n"
 
+    # WHERE TO WATCH LOGIC
     if channel_link:
         caption += f"📺 <b>WATCH HERE: <a href='{channel_link}'>{CHANNEL_NAME}</a></b>\n"
     else:
-        caption += f"📺 <b>Where to watch:</b> Check <a href='{site_url}'>MyAnimeList</a>\n"
+        # Replaced MyAnimeList with Anilist link as requested in prompt context
+        caption += f"📺 <b>Where to watch:</b> Check <a href='{site_url}'>Anilist</a>\n"
 
     caption += f"\n━━━━━━━━━━━━━━━━━━\n"
+    # SPONSORED BY ADMIN CHANNEL
     caption += f"📣 Ads sponsored by <b><a href='{CHANNEL_LINK}'>{CHANNEL_NAME}</a></b>\n"
     caption += f"⚠️ <i>We do not do any copyright thing but only gives recommendation to subscribers to watch it.</i>"
 
@@ -232,4 +236,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         pass
-        
