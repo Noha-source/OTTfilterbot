@@ -225,13 +225,22 @@ async def check_scheduled_posts_job(context: ContextTypes.DEFAULT_TYPE):
 # ================= COMMANDS =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
+    user = update.effective_user
+    
+    # Safely get user name for HTML
+    first_name = user.first_name.replace("<", "&lt;").replace(">", "&gt;") if user.first_name else "Senpai"
+
+    # Attractive Font Style: Bold Headers, Monospace Lists, Italic Footer
     welcome_text = (
-        "🌟 <b>Konnichiwa,</b> 🌟\n\n"
-        "Welcome to the <b>Ultimate Anime Broadcast Bot</b>.\n\n"
-        "🤖 <b>What do I do?</b>\n"
-        "• I deliver the hottest Anime recommendations every 10 minutes.\n"
-        "✨ <i>Sit back, relax, and let the anime come to you!</i>"
+        f"🌟 <b>Konnichiwa, {first_name}!</b> 🌟\n\n"
+        f"<b>Welcome to the Ultimate Anime Broadcast Bot.</b>\n\n"
+        f"🤖 <b>What do I do?</b>\n"
+        f"<code>• I deliver the hottest Anime recommendations every 10 minutes.</code>\n"
+        f"<code>• I notify you about updates from {CHANNEL_NAME}.</code>\n"
+        f"<code>• I bring you direct links to watch your favorite shows.</code>\n\n"
+        f"✨ <i>Sit back, relax, and let the anime come to you!</i>"
     )
+
     if chat.type == 'private':
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute("INSERT OR IGNORE INTO users (user_id) VALUES (?)", (chat.id,))
@@ -241,6 +250,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         async with aiosqlite.connect(DB_NAME) as db:
             await db.execute("INSERT OR IGNORE INTO groups (chat_id, title) VALUES (?, ?)", (chat.id, chat.title))
             await db.commit()
+    
     await update.message.reply_text(welcome_text, parse_mode=ParseMode.HTML)
     await update.message.reply_text("🚀 <b>Fetching your first wide-screen recommendation...</b>", parse_mode=ParseMode.HTML)
     await send_anime_post(context.bot, chat.id)
